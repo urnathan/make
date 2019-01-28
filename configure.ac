@@ -304,6 +304,13 @@ AS_CASE([/$make_cv_job_server/$user_job_server/],
              [Define to 1 to enable job server support in GNU make.])
   ])
 
+# FIXME: for now just turn this on
+AS_CASE([/$ac_cv_cxx_mapper/],
+  [*/no/*], [make_cv_af=no],
+  [AC_DEFINE(MAKE_CXX_MAPPER, 1,
+  	     [Define to 1 to enable C++ module mapper support in GNU make.])
+	     ])
+
 # If dl*() functions are supported we can enable the load operation
 AC_CHECK_DECLS([dlopen, dlsym, dlerror], [], [],
   [[#include <dlfcn.h>]])

@@ -74,7 +74,7 @@ if WINDOWSENV
   make_SOURCES += $(w32_SRCS)
   AM_CPPFLAGS  += -I $(top_srcdir)/src/w32/include
 else
-  make_SOURCES += src/posixos.c
+  make_SOURCES += src/posixos.c src/cxx-mapper.c
 endif
 
 if USE_CUSTOMS
