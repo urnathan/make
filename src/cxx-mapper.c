@@ -17,6 +17,8 @@ You should have received a copy of the GNU General Public License along with
 this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "makeint.h"
+#include "os.h"
+
 #include <stdio.h>
 
 #ifdef HAVE_FCNTL_H
@@ -25,6 +27,14 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 # include <sys/file.h>
 #endif
 
+int mapper_fd = -1;
+const char *mapper_name = NULL;
+
 #ifdef MAKE_CXX_MAPPER
+
+void mapper_setup (const char *option)
+{
+  (void)option;
+}
 
 #endif /* MAKE_CXX_MAPPER */

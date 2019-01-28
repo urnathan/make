@@ -674,6 +674,11 @@ extern char cmd_prefix;
 extern unsigned int job_slots;
 extern double max_load_average;
 
+extern int mapper_fd;
+#if MAKE_CXX_MAPPER
+extern void mapper_setup (const char *option);
+#endif
+
 extern const char *program;
 
 #ifdef VMS
