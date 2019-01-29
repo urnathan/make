@@ -266,6 +266,7 @@ jobserver_acquire (int timeout)
   struct timespec spec;
   struct timespec *specp = NULL;
   sigset_t empty;
+  int mapper = mapper_enabled ();
 
   sigemptyset (&empty);
 
@@ -282,11 +283,15 @@ jobserver_acquire (int timeout)
       fd_set readfds;
       int r;
       char intake;
+      int hwm = job_fds[0];
 
       FD_ZERO (&readfds);
       FD_SET (job_fds[0], &readfds);
 
-      r = pselect (job_fds[0]+1, &readfds, NULL, NULL, specp, &empty);
+      if (mapper)
+	hwm = mapper_pre_pselect (hwm, &readfds);
+
+      r = pselect (hwm+1, &readfds, NULL, NULL, specp, &empty);
       if (r < 0)
         switch (errno)
           {
@@ -307,21 +312,27 @@ jobserver_acquire (int timeout)
         /* Timeout.  */
         return 0;
 
-      /* The read FD is ready: read it!  This is non-blocking.  */
-      EINTRLOOP (r, read (job_fds[0], &intake, 1));
+      if (mapper)
+	r = mapper_post_pselect (r, &readfds);
 
-      if (r < 0)
-        {
-          /* Someone sniped our token!  Try again.  */
-          if (errno == EAGAIN)
-            continue;
+      if (r && FD_ISSET (job_fds[0], &readfds))
+	{
+	  /* The read FD is ready: read it!  This is non-blocking.  */
+	  EINTRLOOP (r, read (job_fds[0], &intake, 1));
 
-          pfatal_with_name (_("read jobs pipe"));
-        }
+	  if (r < 0)
+	    {
+	      /* Someone sniped our token!  Try again.  */
+	      if (errno == EAGAIN)
+		continue;
 
-      /* read() should never return 0: only the master make can reap all the
-         tokens and close the write side...??  */
-      return r > 0;
+	      pfatal_with_name (_("read jobs pipe"));
+	    }
+
+	  /* read() should never return 0: only the master make can reap all the
+	     tokens and close the write side...??  */
+	  return r > 0;
+	}
     }
 }
 

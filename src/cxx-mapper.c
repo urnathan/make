@@ -21,6 +21,10 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include "filedef.h"
 #include "variable.h"
 
+#if defined (HAVE_SYS_WAIT_H) || defined (HAVE_UNION_WAIT)
+# include <sys/wait.h>
+#endif
+
 #include <stdio.h>
 
 #ifdef MAKE_CXX_MAPPER
@@ -45,11 +49,80 @@ static int sock_fd = -1;
 static char *sock_name = NULL;
 static char *sock_cookie = NULL;
 
+/* Set bits in READERS for clients we're listening to.  */
+
+int
+mapper_pre_pselect (int hwm, fd_set *readers)
+{
+  if (sock_fd >=0)
+    {
+      FD_SET (sock_fd, readers);
+      if (hwm < sock_fd)
+	hwm = sock_fd;
+    }
+  return hwm;
+}
+
+/* Process bits in READERS for clients that have something for us.  */
+
+int
+mapper_post_pselect (int r, fd_set *readers)
+{
+  if (sock_fd >= 0 && FD_ISSET (sock_fd, readers))
+    {
+      r--;
+      /* handle new connection.  */
+    }
+  return r;
+}
+
+pid_t
+mapper_wait (int *status)
+{
+  int r;
+  sigset_t empty;
+
+  sigemptyset (&empty);
+  for (;;)
+    {
+      fd_set readfds;
+      int hwm = 0;
+
+      FD_ZERO (&readfds);
+      hwm = mapper_pre_pselect (0, &readfds);
+      r = pselect (hwm + 1, &readfds, NULL, NULL, NULL, &empty);
+      if (r < 0)
+        switch (errno)
+          {
+          case EINTR:
+	    {
+	      /* SIGCHLD will show up as an EINTR.  We're in a loop,
+		 so no need to EINTRLOOP here.  */
+	      pid_t pid = wait (status);
+	      if (pid > 0)
+		return pid;
+	    }
+	    break;
+
+          default:
+            pfatal_with_name (_("pselect mapper"));
+          }
+      else
+	r = mapper_post_pselect (r, &readfds);
+    }
+}
+
+/* Non-zero if the mapper is running.  */
+
 int
 mapper_enabled (void)
 {
   return sock_fd >= 0;
 }
+
+/* Setup a socket according to bound to the address OPTION.
+   Listen for connections.
+   Returns non-zero.  */
 
 int
 mapper_setup (const char *option)
@@ -94,7 +167,11 @@ mapper_setup (const char *option)
     {
 #ifdef NETWORKING
       if (af != AF_UNSPEC)
-	sock_fd = socket (af, SOCK_STREAM, 0);
+	{
+	  sock_fd = socket (af, SOCK_STREAM, 0);
+	  if (sock_fd >= 0)
+	    fd_noinherit (sock_fd);
+	}
 #endif
 #ifdef HAVE_AF_UNIX
       if (un_len)
@@ -109,6 +186,13 @@ mapper_setup (const char *option)
 	{
 	  err = errno;
 	  errmsg = "binding socket";
+	}
+
+      /* I don't know what a good listen queue length might be.  */
+      if (!errmsg && listen (sock_fd, 5))
+	{
+	  err = errno;
+	  errmsg = "listening";
 	}
     }
 
