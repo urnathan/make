@@ -473,7 +473,7 @@ static const struct command_switch switches[] =
     { CHAR_MAX+7, string, &sync_mutex, 1, 1, 0, 0, 0, "sync-mutex" },
     { CHAR_MAX+8, flag_off, &silent_flag, 1, 1, 0, 0, &default_silent_flag, "no-silent" },
     { CHAR_MAX+9, string, &jobserver_auth, 1, 0, 0, 0, 0, "jobserver-fds" },
-    { CHAR_MAX+10,string, &module_mapper, 0, 0, 1, "=/tmp/", 0, "module-mapper" },
+    { CHAR_MAX+10,string, &module_mapper, 0, 0, 1, "=/tmp/make-mapper-$(shell echo $$$$)", 0, "module-mapper" },
     { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
   };
 
@@ -1636,14 +1636,6 @@ main (int argc, char **argv, char **envp)
 
  job_setup_complete:
 
-  if (module_mapper)
-#if MAKE_CXX_MAPPER
-    mapper_setup (module_mapper);
-#else
-  ON (error, NILF,
-      _("warning: C++ mapper support unavailable.");
-#endif
-
   /* The extra indirection through $(MAKE_COMMAND) is done
      for hysterical raisins.  */
 
@@ -2597,6 +2589,11 @@ main (int argc, char **argv, char **envp)
       O (fatal, NILF, _("No targets specified and no makefile found"));
     }
 
+  /* FIXME: Look at variable for value?  */
+  if (module_mapper && !mapper_setup (module_mapper))
+    ON (error, NILF,
+       _("warning: --module-mapper=%s support unavailable."), module_mapper);
+
   /* Update the goals.  */
 
   DB (DB_BASIC, (_("Updating goal targets....\n")));
@@ -3490,6 +3487,8 @@ die (int status)
         verify_file_data_base ();
 
       clean_jobserver (status);
+
+      mapper_clear ();
 
       if (output_context)
         {

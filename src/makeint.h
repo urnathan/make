@@ -674,9 +674,14 @@ extern char cmd_prefix;
 extern unsigned int job_slots;
 extern double max_load_average;
 
-extern int mapper_fd;
 #if MAKE_CXX_MAPPER
-extern void mapper_setup (const char *option);
+extern int mapper_setup (const char *option);
+extern void mapper_clear (void);
+extern int mapper_enabled (void);
+#else
+#define mapper_enabled() (0)
+#define mapper_setup(option) ((void)(option), 0)
+#define mapper_clear() ((void)0)
 #endif
 
 extern const char *program;
