@@ -16,10 +16,19 @@ A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
+/* Experimental component to deal with C++ modules.  Perhaps a more
+   general plugin archicture is needed to make this acceptable?  Let's
+   at least get it to work first.  */
+
+/* Only local connections for now -- unlike GCC's mapper example,
+   which also permits ipv6.
+   Error behaviour is rather abrupt.  */
+
 #include "makeint.h"
 #include "os.h"
 #include "filedef.h"
 #include "variable.h"
+#include "debug.h"
 
 #if defined (HAVE_SYS_WAIT_H) || defined (HAVE_UNION_WAIT)
 # include <sys/wait.h>
@@ -45,21 +54,182 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include <sys/select.h>
 
+/*
+  c++.prefix := {repodir/pfx}
+
+  # module name-> bmi name mapping
+  c++.{modulename} : {bminame} ; @#nop
+  c++.% : $(c++.prefix)%.gcm ; @#nop
+  c++."%" : $(c++.prefix)%.gcmu ; @#nop
+  c++.<%> : $(c++.prefix)%.gcms ; @#nop
+
+  ## bmi dependency:
+  # {bminame} : {sources} ; $(c++.forward objname)
+  # {bminame} : {sources} ; CCrule
+  
+  $(c++.prefix)%.gcm : %.cc ; $(c++.forward $*.o)
+  $(c++.prefix)%.gcmu : % ; \
+  	%(COMPILE.cc) -fmodule-legacy='"$*"' $<
+  $(c++.prefix)%.gcms : % ; \
+  	%(COMPILE.cc) -fmodule-legacy='<$*>' $<
+ */
+
+#define MAPPER_VERSION 0
+
+struct client_state 
+{
+  char *buf;
+  size_t size;
+  size_t pos;
+  int fd;
+  int reading : 1;  /* Filling read buffer.  */
+  int handshake : 1;  /* Expecting Handshake.  */
+  int corked : 1;
+  int bol : 1;
+  int last : 1;
+};
+
 static int sock_fd = -1;
 static char *sock_name = NULL;
 static char *sock_cookie = NULL;
+static struct client_state **clients = NULL;
+static unsigned num_clients = 0;
+static unsigned alloc_clients = 0;
+
+/* Set up a new connection.  */
+static void
+new_client (void)
+{
+  struct client_state *client;
+  int client_fd = accept (sock_fd, NULL, NULL);
+  if (client_fd < 0)
+    {
+      mapper_clear ();
+      return;
+    }
+
+  client = xmalloc (sizeof (*client));
+  memset (client, 0, sizeof (*client));
+  client->fd = client_fd;
+  client->reading = client->handshake = 1;
+  client->size = 10; /* Exercise expansion.  */
+  client->buf = xmalloc (client->size);
+  client->pos = 0;
+  client->bol = 1;
+  
+  if (num_clients == alloc_clients)
+    {
+      alloc_clients = (alloc_clients ? alloc_clients : 10) * 2;
+      clients = xrealloc (clients, alloc_clients * sizeof (*clients));
+    }
+
+  DB (DB_PLUGIN, ("module:new connection"));
+
+  clients[num_clients++] = client;
+}
+
+static void
+delete_client (unsigned ix, struct client_state *client)
+{
+  close (client->fd);
+  free (client->buf);
+  free (client);
+
+  if (ix + 1 != num_clients)
+    clients[ix] = clients[num_clients-1];
+  clients[--num_clients] = NULL; /* Make unreachable.  */
+}
+
+static void
+client_process (unsigned ix, struct client_state *client)
+{
+  DB (DB_PLUGIN, ("Message from client %u '%s'\n", ix, client->buf));
+
+  /* Set up for more reading.  */
+  client->pos = 0;
+  client->bol = 1;
+  client->corked = 0;
+  client->last = 0;
+}
+
+/* Read data from a client.  */
+
+static void
+client_read (unsigned ix, struct client_state *client)
+{
+  ssize_t bytes;
+
+  if (client->size - client->pos < 2)
+    {
+      client->size *= 2;
+      client->buf = xrealloc (client->buf, client->size);
+    }
+
+  bytes = read (client->fd, client->buf + client->pos,
+		client->size - client->pos - 1);
+  if (bytes <= 0)
+    {
+      /* Error or EOF.  */
+      delete_client (ix, client);
+      return;
+    }
+  
+  /* Data.  */
+  for (; bytes;)
+    {
+      char *probe;
+      size_t len;
+
+      if (client->bol)
+	{
+	  int plus = client->buf[client->pos] == '+';
+	  if (client->corked)
+	    client->last = !plus;
+	  else
+	    client->corked = plus;
+	  client->bol = 0;
+	}
+
+      probe = memchr (client->buf + client->pos, '\n', bytes);
+      if (!probe)
+	break;
+
+      len = probe - (client->buf + client->pos) + 1;
+      client->pos += len;
+      bytes -= len;
+      client->bol = 1;
+    }
+  client->pos += bytes;
+
+  if (client->bol && client->pos && (client->last || !client->corked))
+    {
+      client->buf[client->pos] = 0;
+      client_process (ix, client);
+    }
+}
 
 /* Set bits in READERS for clients we're listening to.  */
 
 int
 mapper_pre_pselect (int hwm, fd_set *readers)
 {
+  unsigned ix;
+
   if (sock_fd >=0)
     {
-      FD_SET (sock_fd, readers);
       if (hwm < sock_fd)
 	hwm = sock_fd;
+      FD_SET (sock_fd, readers);
     }
+
+  for (ix = num_clients; ix--;)
+    if (clients[ix]->reading)
+      {
+	if (hwm < clients[ix]->fd)
+	  hwm = clients[ix]->fd;
+	FD_SET (clients[ix]->fd, readers);
+      }
+  
   return hwm;
 }
 
@@ -68,11 +238,18 @@ mapper_pre_pselect (int hwm, fd_set *readers)
 int
 mapper_post_pselect (int r, fd_set *readers)
 {
+  unsigned ix;
+
   if (sock_fd >= 0 && FD_ISSET (sock_fd, readers))
     {
       r--;
-      /* handle new connection.  */
+      new_client ();
     }
+
+  /* Do backwards because reading can cause client deletion.  */
+  for (ix = num_clients; ix--;)
+    if (FD_ISSET(clients[ix]->fd, readers))
+      client_read (ix, clients[ix]);
   return r;
 }
 
@@ -98,7 +275,7 @@ mapper_wait (int *status)
 	    {
 	      /* SIGCHLD will show up as an EINTR.  We're in a loop,
 		 so no need to EINTRLOOP here.  */
-	      pid_t pid = wait (status);
+	      pid_t pid = waitpid ((pid_t)-1, status, WNOHANG);
 	      if (pid > 0)
 		return pid;
 	    }
@@ -227,6 +404,8 @@ mapper_setup (const char *option)
 void
 mapper_clear (void)
 {
+  unsigned ix;
+
   if (sock_fd >= 0)
     close (sock_fd);
   sock_fd = -1;
@@ -234,6 +413,13 @@ mapper_clear (void)
     unlink (sock_name + 1);
   free (sock_name);
   sock_name = NULL;
+
+  for (ix = num_clients; ix--;)
+    delete_client (ix, clients[ix]);
+
+  free (clients);
+  clients = NULL;
+  num_clients = alloc_clients = 0;
 }
 
 #endif /* MAKE_CXX_MAPPER */

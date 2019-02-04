@@ -19,6 +19,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #define DB_VERBOSE      (0x002)
 #define DB_JOBS         (0x004)
 #define DB_IMPLICIT     (0x008)
+#define DB_PLUGIN	(0x010)
 #define DB_MAKEFILES    (0x100)
 
 #define DB_ALL          (0xfff)

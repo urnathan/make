@@ -756,6 +756,9 @@ decode_debug_flags (void)
               case 'n':
                 db_level = 0;
                 break;
+	      case 'p':
+		db_level |= DB_PLUGIN;
+		break;
               case 'v':
                 db_level |= DB_BASIC | DB_VERBOSE;
                 break;
