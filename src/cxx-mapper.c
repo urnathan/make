@@ -77,20 +77,20 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #define MAPPER_VERSION 0
 
-enum client_codes
+enum response_codes
 {
   CC_HANDSHAKE,
   CC_IMPORT,
+  CC_INCLUDE,
   CC_EXPORT,
   CC_DONE,
-  CC_INCLUDE,
-  CC_UNKNOWN
+  CC_ERROR
 };
 
 struct client_request
 {
-  enum client_codes code : 8;
-  unsigned error : 8;
+  enum response_codes code : 8;
+  const char *resp;
 };
 
 struct client_state 
@@ -187,8 +187,7 @@ client_print (struct client_state *client, const char *fmt, ...)
 
       va_start (args, fmt);
       space = client->buf_size - client->buf_pos;
-      actual = vsnprintf (client->buf + client->buf_pos,
-			  actual, fmt, args);
+      actual = vsnprintf (client->buf + client->buf_pos, space, fmt, args);
       va_end (args);
       /* Guarantee 3 trailing elts.  */
       if (actual + 3 <= space)
@@ -230,6 +229,9 @@ client_parse (struct client_state *client)
 {
   char *token;
   struct client_request *resp = &client->requests[client->num_requests];
+  unsigned req = CC_ERROR;
+
+  resp->resp = NULL;
 
   DB (DB_PLUGIN, ("module:processing '%s'\n", &client->buf[client->buf_pos]));
   if (client->buf[client->buf_pos] == '+'
@@ -241,45 +243,64 @@ client_parse (struct client_state *client)
     return 1;
   else if (client->handshake)
     {
-      int error = 0;
       if (!strcmp (token, "HELLO"))
 	{
+	  /* HELLO $version $compiler $cookie  */
 	  const char *ver = client_token (client);
 	  const char *compiler = ver ? client_token (client) : NULL;
 	  char *ident = &client->buf[client->buf_pos];
-	  /* FIXME: Check ident.  */
-	  (void)ident;
-	  (void)ver;
 	  (void)compiler;
-	  client->handshake = 0;
+
+	  if (sock_cookie && strcmp (sock_cookie, ident))
+	    resp->resp = "Ident mismatch";
+	  else
+	    {
+	      client->handshake = 0;
+	      req = CC_HANDSHAKE;
+	    }
 	}
       else
-	error = 1;
-      resp->code = CC_HANDSHAKE;
-      resp->error = error;
-    }
-  else if (strcmp (token, "IMPORT"))
-    {
-    }
-  else if (strcmp (token, "INCLUDE"))
-    {
-    }
-  else if (strcmp (token, "EXPORT"))
-    {
-    }
-  else if (strcmp (token, "DONE"))
-    {
+	resp->resp = "Expected handshake";
     }
   else
-    resp->code = CC_UNKNOWN;
+    {
+      /* Same order as enum response_codes.  */
+      static const char *const words[] = 
+	{
+	  "IMPORT",  /* IMPORT $modulename  */
+	  "INCLUDE", /* INCLUDE $includefile  */
+	  "EXPORT",  /* EXPORT $modulename  */
+	  "DONE",    /* DONE $modulename  */
+	  NULL
+	};
 
+      for (req = CC_IMPORT; req != CC_ERROR; req++)
+	if (!strcmp (token, words[req-CC_IMPORT]))
+	  {
+	    char *operand = client_token (client);
+	    if (!operand)
+	      {
+		req = CC_ERROR;
+		resp->resp = "Malformed request";
+		goto barf;
+	      }
+
+	    break;
+	  }
+
+      if (req == CC_ERROR)
+	resp->resp = "Unknown request";
+    barf:;
+    }
+
+  resp->code = req;
   client->num_requests++;
 
   while (client->buf[client->buf_pos])
     client->buf_pos++;
   client->buf_pos++;
 
-  return resp->code != CC_UNKNOWN;
+  return 1;
 }
 
 static void
@@ -298,18 +319,13 @@ client_write (struct client_state *client, unsigned slot)
 	{
 	case CC_HANDSHAKE:
 	  {
-	    if (!req->error)
-	      {
-		char *repo = variable_expand ("$(.c++.prefix)");
-		client_print (client, "OK %u GNUMake %s", MAPPER_VERSION, repo);
-	      }
-	    else
-	      client_print (client, "ERROR Bad handshake");
+	    char *repo = variable_expand ("$(.c++.prefix)");
+	    client_print (client, "OK %u GNUMake %s", MAPPER_VERSION, repo);
 	  }
 	  break;
 
-	case CC_UNKNOWN:
-	  client_print (client, "ERROR Unknown request");
+	case CC_ERROR:
+	  client_print (client, "ERROR %s", req->resp);
 	  break;
 
 	case CC_DONE:
