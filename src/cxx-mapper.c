@@ -22,7 +22,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 /* Only local connections for now -- unlike GCC's mapper example,
    which also permits ipv6.
-   Error behaviour is rather abrupt.  */
+   Error behaviour is rather abrupt, and incomplete.  */
 
 #include "makeint.h"
 #include "os.h"
@@ -34,6 +34,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 # include <sys/wait.h>
 #endif
 
+#include <stdarg.h>
 #include <stdio.h>
 
 #ifdef MAKE_CXX_MAPPER
@@ -76,17 +77,40 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #define MAPPER_VERSION 0
 
+enum client_codes
+{
+  CC_HANDSHAKE,
+  CC_IMPORT,
+  CC_EXPORT,
+  CC_DONE,
+  CC_INCLUDE,
+  CC_UNKNOWN
+};
+
+struct client_request
+{
+  enum client_codes code : 8;
+  unsigned error : 8;
+};
+
 struct client_state 
 {
   char *buf;
-  size_t size;
-  size_t pos;
+  size_t buf_size;
+  size_t buf_pos;
+
+  unsigned cix;
   int fd;
+
   int reading : 1;  /* Filling read buffer.  */
   int handshake : 1;  /* Expecting Handshake.  */
-  int corked : 1;
   int bol : 1;
   int last : 1;
+  int corking : 16;  /* number of lines, if corked.  */
+
+  struct client_request *requests;
+  unsigned num_requests;
+  unsigned num_awaiting;
 };
 
 static int sock_fd = -1;
@@ -100,6 +124,8 @@ static unsigned alloc_clients = 0;
 static void
 new_client (void)
 {
+  static unsigned factory = 0;
+
   struct client_state *client;
   int client_fd = accept (sock_fd, NULL, NULL);
   if (client_fd < 0)
@@ -110,70 +136,261 @@ new_client (void)
 
   client = xmalloc (sizeof (*client));
   memset (client, 0, sizeof (*client));
+  client->cix = ++factory;
   client->fd = client_fd;
   client->reading = client->handshake = 1;
-  client->size = 10; /* Exercise expansion.  */
-  client->buf = xmalloc (client->size);
-  client->pos = 0;
+  client->buf_size = 10; /* Exercise expansion.  */
+  client->buf = xmalloc (client->buf_size);
+
+  client->buf_pos = 0;
   client->bol = 1;
-  
+  client->last = client->corking = 0;
+  client->num_requests = client->num_awaiting = 0;
+  client->requests = NULL;
+
   if (num_clients == alloc_clients)
     {
       alloc_clients = (alloc_clients ? alloc_clients : 10) * 2;
       clients = xrealloc (clients, alloc_clients * sizeof (*clients));
     }
 
-  DB (DB_PLUGIN, ("module:new connection"));
+  DB (DB_PLUGIN, ("module:new connection, client:%u\n", client->cix));
 
   clients[num_clients++] = client;
 }
 
 static void
-delete_client (unsigned ix, struct client_state *client)
+delete_client (struct client_state *client, unsigned slot)
 {
+  DB (DB_PLUGIN, ("module:destroying client:%u\n", client->cix));
   close (client->fd);
   free (client->buf);
+  free (client->requests);
   free (client);
 
-  if (ix + 1 != num_clients)
-    clients[ix] = clients[num_clients-1];
+  if (slot + 1 != num_clients)
+    clients[slot] = clients[num_clients-1];
   clients[--num_clients] = NULL; /* Make unreachable.  */
 }
 
 static void
-client_process (unsigned ix, struct client_state *client)
+client_print (struct client_state *client, const char *fmt, ...)
 {
-  DB (DB_PLUGIN, ("Message from client %u '%s'\n", ix, client->buf));
+  size_t actual;
+  if (client->corking && fmt[0])
+    client->buf[client->buf_pos++] = '+';
+
+  for (;;)
+    {
+      va_list args;
+      size_t space;
+
+      va_start (args, fmt);
+      space = client->buf_size - client->buf_pos;
+      actual = vsnprintf (client->buf + client->buf_pos,
+			  actual, fmt, args);
+      va_end (args);
+      /* Guarantee 3 trailing elts.  */
+      if (actual + 3 <= space)
+	break;
+      client->buf_size *= 2;
+      client->buf = xrealloc (client->buf, client->buf_size);
+      if (actual <= space)
+	break;
+    }
+  client->buf[actual++] = '\n';
+  client->buf_pos += actual;
+}
+
+static char *
+client_token (struct client_state *client)
+{
+  char *ptr = &client->buf[client->buf_pos];
+  char *token = ptr;
+
+  token = ptr;
+  while (*ptr && !isblank (*ptr))
+    ptr++;
+
+  if (token == ptr)
+    token = NULL;
+  else if (*ptr)
+    {
+      *ptr++ = 0;
+      while (isblank (*ptr))
+	ptr++;
+    }
+
+  client->buf_pos = ptr - client->buf;
+  return token;
+}
+
+static int
+client_parse (struct client_state *client)
+{
+  char *token;
+  struct client_request *resp = &client->requests[client->num_requests];
+
+  DB (DB_PLUGIN, ("module:processing '%s'\n", &client->buf[client->buf_pos]));
+  if (client->buf[client->buf_pos] == '+'
+      || client->buf[client->buf_pos] == '-')
+    client->buf_pos++;
+
+  token = client_token (client);
+  if (!token)
+    return 1;
+  else if (client->handshake)
+    {
+      int error = 0;
+      if (!strcmp (token, "HELLO"))
+	{
+	  const char *ver = client_token (client);
+	  const char *compiler = ver ? client_token (client) : NULL;
+	  char *ident = &client->buf[client->buf_pos];
+	  /* FIXME: Check ident.  */
+	  (void)ident;
+	  (void)ver;
+	  (void)compiler;
+	  client->handshake = 0;
+	}
+      else
+	error = 1;
+      resp->code = CC_HANDSHAKE;
+      resp->error = error;
+    }
+  else if (strcmp (token, "IMPORT"))
+    {
+    }
+  else if (strcmp (token, "INCLUDE"))
+    {
+    }
+  else if (strcmp (token, "EXPORT"))
+    {
+    }
+  else if (strcmp (token, "DONE"))
+    {
+    }
+  else
+    resp->code = CC_UNKNOWN;
+
+  client->num_requests++;
+
+  while (client->buf[client->buf_pos])
+    client->buf_pos++;
+  client->buf_pos++;
+
+  return resp->code != CC_UNKNOWN;
+}
+
+static void
+client_write (struct client_state *client, unsigned slot)
+{
+  unsigned ix;
+
+  client->buf_pos = 0;
+  client->corking = client->num_requests > 1;
+
+  for (ix = 0; ix != client->num_requests; ix++)
+    {
+      struct client_request *req = &client->requests[ix];
+
+      switch (req->code)
+	{
+	case CC_HANDSHAKE:
+	  {
+	    if (!req->error)
+	      {
+		char *repo = variable_expand ("$(.c++.prefix)");
+		client_print (client, "OK %u GNUMake %s", MAPPER_VERSION, repo);
+	      }
+	    else
+	      client_print (client, "ERROR Bad handshake");
+	  }
+	  break;
+
+	case CC_UNKNOWN:
+	  client_print (client, "ERROR Unknown request");
+	  break;
+
+	case CC_DONE:
+	case CC_INCLUDE:
+	case CC_IMPORT:
+	case CC_EXPORT:
+	  ;
+	}
+    }
+
+  free (client->requests);
+  client->requests = NULL;
+  client->num_requests = client->num_awaiting = 0;
+
+  if (client->buf_pos)
+    {
+      ssize_t bytes;
+
+      if (client->corking)
+	client->buf[client->buf_pos++] = '\n';
+      client->buf[client->buf_pos++] = 0;
+      EINTRLOOP (bytes, write (client->fd, client->buf, client->buf_pos));
+      if (bytes < 0 || (size_t)bytes != client->buf_pos)
+	{
+	  delete_client (client, slot);
+	  return;
+	}
+    }
 
   /* Set up for more reading.  */
-  client->pos = 0;
+  client->buf_pos = 0;
   client->bol = 1;
-  client->corked = 0;
+  client->corking = 0;
   client->last = 0;
+  client->reading = 1;
+}
+
+static void
+client_process (struct client_state *client, unsigned slot)
+{
+  unsigned reqs = client->corking + !client->corking;
+  size_t end = client->buf_pos;
+
+  client->reading = 0;
+  client->requests = xmalloc (reqs * sizeof (*client->requests));
+  client->num_requests = client->num_awaiting = 0;
+
+  client->buf_pos = 0;
+  while (end != client->buf_pos && client_parse (client))
+    continue;
+
+  if (!client->num_awaiting)
+    client_write (client, slot);
 }
 
 /* Read data from a client.  */
 
 static void
-client_read (unsigned ix, struct client_state *client)
+client_read (struct client_state *client, unsigned slot)
 {
   ssize_t bytes;
 
-  if (client->size - client->pos < 2)
+  if (client->buf_size - client->buf_pos < 2)
     {
-      client->size *= 2;
-      client->buf = xrealloc (client->buf, client->size);
+      client->buf_size *= 2;
+      client->buf = xrealloc (client->buf, client->buf_size);
     }
 
-  bytes = read (client->fd, client->buf + client->pos,
-		client->size - client->pos - 1);
+  bytes = read (client->fd, client->buf + client->buf_pos,
+		client->buf_size - client->buf_pos - 1);
   if (bytes <= 0)
     {
       /* Error or EOF.  */
-      delete_client (ix, client);
+      delete_client (client, slot);
       return;
     }
-  
+
+  DB (DB_PLUGIN, ("module:client:%u read %u bytes '%.*s'\n",
+		  client->cix, (unsigned) bytes,
+		  (int) bytes, client->buf + client->buf_pos));
+
   /* Data.  */
   for (; bytes;)
     {
@@ -182,30 +399,31 @@ client_read (unsigned ix, struct client_state *client)
 
       if (client->bol)
 	{
-	  int plus = client->buf[client->pos] == '+';
-	  if (client->corked)
-	    client->last = !plus;
+	  int plus = client->buf[client->buf_pos] == '+';
+	  if (client->corking)
+	    {
+	      client->corking++;
+	      client->last = !plus;
+	    }
 	  else
-	    client->corked = plus;
+	    client->corking = plus;
 	  client->bol = 0;
 	}
 
-      probe = memchr (client->buf + client->pos, '\n', bytes);
+      probe = memchr (client->buf + client->buf_pos, '\n', bytes);
       if (!probe)
 	break;
 
-      len = probe - (client->buf + client->pos) + 1;
-      client->pos += len;
+      len = probe - (client->buf + client->buf_pos) + 1;
+      client->buf_pos += len;
+      client->buf[client->buf_pos - 1] = 0;
       bytes -= len;
       client->bol = 1;
     }
-  client->pos += bytes;
+  client->buf_pos += bytes;
 
-  if (client->bol && client->pos && (client->last || !client->corked))
-    {
-      client->buf[client->pos] = 0;
-      client_process (ix, client);
-    }
+  if (client->bol && client->buf_pos && (client->last || !client->corking))
+    client_process (client, slot);
 }
 
 /* Set bits in READERS for clients we're listening to.  */
@@ -248,8 +466,8 @@ mapper_post_pselect (int r, fd_set *readers)
 
   /* Do backwards because reading can cause client deletion.  */
   for (ix = num_clients; ix--;)
-    if (FD_ISSET(clients[ix]->fd, readers))
-      client_read (ix, clients[ix]);
+    if (clients[ix]->reading && FD_ISSET(clients[ix]->fd, readers))
+      client_read (clients[ix], ix);
   return r;
 }
 
@@ -404,8 +622,6 @@ mapper_setup (const char *option)
 void
 mapper_clear (void)
 {
-  unsigned ix;
-
   if (sock_fd >= 0)
     close (sock_fd);
   sock_fd = -1;
@@ -414,8 +630,8 @@ mapper_clear (void)
   free (sock_name);
   sock_name = NULL;
 
-  for (ix = num_clients; ix--;)
-    delete_client (ix, clients[ix]);
+  while (num_clients)
+    delete_client (clients[0], 0);
 
   free (clients);
   clients = NULL;
