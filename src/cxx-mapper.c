@@ -28,6 +28,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include "os.h"
 #include "filedef.h"
 #include "variable.h"
+#include "dep.h"
 #include "debug.h"
 
 #if defined (HAVE_SYS_WAIT_H) || defined (HAVE_UNION_WAIT)
@@ -56,22 +57,22 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include <sys/select.h>
 
 /*
-  c++.prefix := {repodir/pfx}
+  C++.PREFIX := {repodir/pfx}
 
   # module name-> bmi name mapping
-  c++.{modulename} : {bminame} ; @#nop
-  c++.% : $(c++.prefix)%.gcm ; @#nop
-  c++."%" : $(c++.prefix)%.gcmu ; @#nop
-  c++.<%> : $(c++.prefix)%.gcms ; @#nop
+  # C++.{modulename} : {bminame} ; @#nop
+  C++.% : $(C++.PREFIX)%.gcm ; @#nop
+  C++."%" : $(C++.PREFIX)%.gcmu ; @#nop
+  C++.<%> : $(C++.PREFIX)%.gcms ; @#nop
 
   ## bmi dependency:
-  # {bminame} : {sources} ; $(c++.forward objname)
+  # {bminame} : {sources} ; $(C++.FORWARD objname)
   # {bminame} : {sources} ; CCrule
   
-  $(c++.prefix)%.gcm : %.cc ; $(c++.forward $*.o)
-  $(c++.prefix)%.gcmu : % ; \
+  $(C++.PREFIX)%.gcm : %.cc ; $(C++.FORWARD $*.o)
+  $(C++.PREFIX)%.gcmu : % ; \
   	%(COMPILE.cc) -fmodule-legacy='"$*"' $<
-  $(c++.prefix)%.gcms : % ; \
+  $(C++.PREFIX)%.gcms : % ; \
   	%(COMPILE.cc) -fmodule-legacy='<$*>' $<
  */
 
@@ -84,13 +85,16 @@ enum response_codes
   CC_INCLUDE,
   CC_EXPORT,
   CC_DONE,
-  CC_ERROR
+  CC_ERROR,
+  CC_TRANSLATE,
 };
 
 struct client_request
 {
   enum response_codes code : 8;
+  unsigned waiting : 8;
   const char *resp;
+  struct file *file;
 };
 
 struct client_state 
@@ -119,6 +123,7 @@ static char *sock_cookie = NULL;
 static struct client_state **clients = NULL;
 static unsigned num_clients = 0;
 static unsigned alloc_clients = 0;
+static unsigned waiting_clients = 0;
 
 /* Set up a new connection.  */
 static void
@@ -177,7 +182,7 @@ static void
 client_print (struct client_state *client, const char *fmt, ...)
 {
   size_t actual;
-  if (client->corking && fmt[0])
+  if (client->corking)
     client->buf[client->buf_pos++] = '+';
 
   for (;;)
@@ -194,11 +199,13 @@ client_print (struct client_state *client, const char *fmt, ...)
 	break;
       client->buf_size *= 2;
       client->buf = xrealloc (client->buf, client->buf_size);
-      if (actual <= space)
+      if (actual < space)
 	break;
     }
-  client->buf[actual++] = '\n';
+  DB (DB_PLUGIN, ("module:sending '%.*s'\n", (int)(actual + client->corking),
+		  &client->buf[client->buf_pos - client->corking]));
   client->buf_pos += actual;
+  client->buf[client->buf_pos++] = '\n';
 }
 
 static char *
@@ -231,6 +238,8 @@ client_parse (struct client_state *client)
   struct client_request *resp = &client->requests[client->num_requests];
   unsigned req = CC_ERROR;
 
+  resp->waiting = 0;
+  resp->file = NULL;
   resp->resp = NULL;
 
   DB (DB_PLUGIN, ("module:processing '%s'\n", &client->buf[client->buf_pos]));
@@ -284,8 +293,53 @@ client_parse (struct client_state *client)
 		resp->resp = "Malformed request";
 		goto barf;
 	      }
+	    else
+	      {
+		// look for a target called c++.{modulename}
+		size_t len = strlen (operand);
+		char *target_name = xmalloc (len + 6);
+		struct file *f;
 
-	    break;
+		strcpy (target_name, "C++.");
+		memcpy (target_name + 4, operand, len + 1);
+
+		f = lookup_file (target_name);
+		if (req == CC_INCLUDE)
+		  {
+		    /* FIXME: think about remapping.  */
+		    if (f)
+		      req = CC_TRANSLATE;
+		    resp->resp = "";
+		    break;
+		  }
+
+		if (!f)
+		  {
+		    f = enter_file (strcache_add (target_name));
+		    f->phony = 1;
+		    f->is_target = 1;
+		    f->last_mtime = NONEXISTENT_MTIME;
+		    f->mtime_before_update = NONEXISTENT_MTIME;
+		    try_implicit_rule (f, 0);
+		  }
+		free (target_name);
+
+		/* FIXME: go build the bmi.  */
+		/* FIXME: go exec the commands.  */
+		/* FIXME: strip prefix.  */
+		if (f->deps && !f->deps->next)
+		  {
+		    resp->file = f;
+		    resp->waiting = req == CC_IMPORT ? 1 : 2;
+		    client->num_awaiting++;
+		  }
+		else
+		  {
+		    resp->resp = "Unknown module name";
+		    req = CC_ERROR;
+		  }
+		break;
+	      }
 	  }
 
       if (req == CC_ERROR)
@@ -319,7 +373,7 @@ client_write (struct client_state *client, unsigned slot)
 	{
 	case CC_HANDSHAKE:
 	  {
-	    char *repo = variable_expand ("$(.c++.prefix)");
+	    char *repo = variable_expand ("$(.C++.PREFIX)");
 	    client_print (client, "OK %u GNUMake %s", MAPPER_VERSION, repo);
 	  }
 	  break;
@@ -328,11 +382,20 @@ client_write (struct client_state *client, unsigned slot)
 	  client_print (client, "ERROR %s", req->resp);
 	  break;
 
-	case CC_DONE:
 	case CC_INCLUDE:
+	  client_print (client, "INCLUDE %s", req->resp);
+	  break;
+
+	case CC_TRANSLATE:
+	  client_print (client, "IMPORT %s", req->resp);
+	  break;
+	  
 	case CC_IMPORT:
 	case CC_EXPORT:
-	  ;
+	  client_print (client, "OK %s", req->resp);
+	  break;
+
+	case CC_DONE:;
 	}
     }
 
@@ -346,7 +409,6 @@ client_write (struct client_state *client, unsigned slot)
 
       if (client->corking)
 	client->buf[client->buf_pos++] = '\n';
-      client->buf[client->buf_pos++] = 0;
       EINTRLOOP (bytes, write (client->fd, client->buf, client->buf_pos));
       if (bytes < 0 || (size_t)bytes != client->buf_pos)
 	{
@@ -377,8 +439,58 @@ client_process (struct client_state *client, unsigned slot)
   while (end != client->buf_pos && client_parse (client))
     continue;
 
-  if (!client->num_awaiting)
+  if (client->num_awaiting)
+    {
+      /* FIXME: Hide a job.  */
+      waiting_clients++;
+    }
+  else
     client_write (client, slot);
+}
+
+static void
+request_unblock (struct client_state *client,
+		 struct client_request *req,
+		 unsigned slot)
+{
+  (void)slot;
+
+  if (req->waiting == 1)
+    {
+      /* IMPORT, building bmi.  */
+      /* FIXME: Build it.  */
+      req->waiting = 2;
+    }
+
+  if (req->waiting == 2)
+    {
+      /* Doing commands.  */
+      /* FIXME: Do them.  */
+      req->waiting = 3;
+    }
+
+  if (req->waiting == 3)
+    {
+      /* FIXME:Strip prefix.  */
+      req->resp = req->file->deps->file->name;
+      req->waiting = 0;
+      client->num_awaiting--;
+    }
+}
+
+static void
+client_unblock (struct client_state *client, unsigned slot)
+{
+  unsigned ix;
+  for (ix = client->num_requests; ix--;)
+    if (client->requests[ix].waiting)
+      request_unblock (client, &client->requests[ix], slot);
+  if (!client->num_awaiting)
+    {
+      /* Unhide a job.  */
+      waiting_clients--;
+      client_write (client, slot);
+    }
 }
 
 /* Read data from a client.  */
@@ -448,6 +560,14 @@ int
 mapper_pre_pselect (int hwm, fd_set *readers)
 {
   unsigned ix;
+
+  if (waiting_clients)
+    {
+      unsigned slot;
+      for (slot = num_clients; slot--;)
+	if (clients[slot]->num_awaiting)
+	  client_unblock (clients[slot], slot);
+    }
 
   if (sock_fd >=0)
     {
@@ -534,13 +654,12 @@ mapper_enabled (void)
 /* Setup a socket according to bound to the address OPTION.
    Listen for connections.
    Returns non-zero.  */
-
+// "=/tmp/make-mapper-$(shell echo $$$$)", 
 int
 mapper_setup (const char *option)
 {
   int err = 0;
   const char *errmsg = NULL;
-  char *writable = xstrdup (variable_expand (option));
   size_t len;
 #ifdef NETWORKING
   int af = AF_UNSPEC;
@@ -549,11 +668,30 @@ mapper_setup (const char *option)
   size_t un_len = 0;
 #endif
 #endif
+  char *writable;
 
-  sock_cookie = strchr (writable, '?');
-  if (sock_cookie)
-    *sock_cookie++ = 0;
-  len = strlen (writable);
+  if (option[0] == '?')
+    {
+      sock_cookie = xstrdup (option + 1);
+      option = "";
+    }
+  if (option[0])
+    {
+      writable = xstrdup (option);
+      if (!sock_cookie)
+	{
+	  sock_cookie = strchr (writable, '?');
+	  if (sock_cookie)
+	    *sock_cookie++ = 0;
+	}
+      len = strlen (writable);
+    }
+  else
+    {
+      pid_t pid = getpid ();
+      writable = xmalloc (30);
+      len = snprintf (writable, 30, "=/tmp/make-mapper-%d", (int)pid);
+    }
 
   /* Does it look like a socket?  */
   if (writable[0] == '=')

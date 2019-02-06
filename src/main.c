@@ -473,7 +473,7 @@ static const struct command_switch switches[] =
     { CHAR_MAX+7, string, &sync_mutex, 1, 1, 0, 0, 0, "sync-mutex" },
     { CHAR_MAX+8, flag_off, &silent_flag, 1, 1, 0, 0, &default_silent_flag, "no-silent" },
     { CHAR_MAX+9, string, &jobserver_auth, 1, 0, 0, 0, 0, "jobserver-fds" },
-    { CHAR_MAX+10,string, &module_mapper, 0, 0, 1, "=/tmp/make-mapper-$(shell echo $$$$)", 0, "module-mapper" },
+    { CHAR_MAX+10,string, &module_mapper, 0, 0, 1, "", 0, "module-mapper" },
     { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
   };
 
@@ -1340,6 +1340,9 @@ main (int argc, char **argv, char **envp)
 #endif
 #ifdef MAKE_LOAD
                            " load"
+#endif
+#ifdef MAKE_MAPPER
+      			   " c++-mapper"
 #endif
                            ;
 

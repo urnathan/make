@@ -675,9 +675,9 @@ extern unsigned int job_slots;
 extern double max_load_average;
 
 #if MAKE_CXX_MAPPER
+extern int mapper_enabled (void);
 extern int mapper_setup (const char *option);
 extern void mapper_clear (void);
-extern int mapper_enabled (void);
 extern int mapper_pre_pselect (int, fd_set *);
 extern int mapper_post_pselect (int, fd_set *);
 extern pid_t mapper_wait (int *);
