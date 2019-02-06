@@ -29,6 +29,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include "filedef.h"
 #include "variable.h"
 #include "dep.h"
+#include "job.h"
 #include "debug.h"
 
 #if defined (HAVE_SYS_WAIT_H) || defined (HAVE_UNION_WAIT)
@@ -240,7 +241,7 @@ client_parse (struct client_state *client)
 
   resp->waiting = 0;
   resp->file = NULL;
-  resp->resp = NULL;
+  resp->resp = "Unknown request";
 
   DB (DB_PLUGIN, ("module:processing '%s'\n", &client->buf[client->buf_pos]));
   if (client->buf[client->buf_pos] == '+'
@@ -291,11 +292,11 @@ client_parse (struct client_state *client)
 	      {
 		req = CC_ERROR;
 		resp->resp = "Malformed request";
-		goto barf;
+		break;
 	      }
 	    else
 	      {
-		// look for a target called c++.{modulename}
+		/* look for a target called C++.{modulename}.  */
 		size_t len = strlen (operand);
 		char *target_name = xmalloc (len + 6);
 		struct file *f;
@@ -306,7 +307,7 @@ client_parse (struct client_state *client)
 		f = lookup_file (target_name);
 		if (req == CC_INCLUDE)
 		  {
-		    /* FIXME: think about remapping.  */
+		    // FIXME: think about remapping.
 		    if (f)
 		      req = CC_TRANSLATE;
 		    resp->resp = "";
@@ -324,13 +325,10 @@ client_parse (struct client_state *client)
 		  }
 		free (target_name);
 
-		/* FIXME: go build the bmi.  */
-		/* FIXME: go exec the commands.  */
-		/* FIXME: strip prefix.  */
 		if (f->deps && !f->deps->next)
 		  {
 		    resp->file = f;
-		    resp->waiting = req == CC_IMPORT ? 1 : 2;
+		    resp->waiting = req == CC_IMPORT ? 1 : 3;
 		    client->num_awaiting++;
 		  }
 		else
@@ -341,10 +339,6 @@ client_parse (struct client_state *client)
 		break;
 	      }
 	  }
-
-      if (req == CC_ERROR)
-	resp->resp = "Unknown request";
-    barf:;
     }
 
   resp->code = req;
@@ -441,7 +435,10 @@ client_process (struct client_state *client, unsigned slot)
 
   if (client->num_awaiting)
     {
-      /* FIXME: Hide a job.  */
+      if (job_slots)
+	job_slots++;
+      else if (jobserver_enabled ())
+	abort (); // FIXME: Jobserver case.
       waiting_clients++;
     }
   else
@@ -450,29 +447,49 @@ client_process (struct client_state *client, unsigned slot)
 
 static void
 request_unblock (struct client_state *client,
-		 struct client_request *req,
-		 unsigned slot)
+		 struct client_request *req)
 {
-  (void)slot;
-
   if (req->waiting == 1)
     {
       /* IMPORT, building bmi.  */
-      /* FIXME: Build it.  */
       req->waiting = 2;
+      force_update_file (req->file->deps->file);
     }
 
   if (req->waiting == 2)
     {
-      /* Doing commands.  */
-      /* FIXME: Do them.  */
+      /* Waiting for BMI.  */
+      if (req->file->deps->file->command_state != cs_finished
+	  || req->file->deps->file->update_status != us_success)
+	return;
+
       req->waiting = 3;
     }
-
+  
   if (req->waiting == 3)
     {
-      /* FIXME:Strip prefix.  */
-      req->resp = req->file->deps->file->name;
+      /* Doing commands.  */
+      char *repo;
+      const char *name;
+      size_t len;
+
+      if (req->file->command_state == cs_not_started)
+	{
+	  force_remake_file (req->file);
+	  return;
+	}
+      if (req->file->command_state != cs_finished)
+	return;
+      if (req->file->update_status != us_success)
+	return;
+
+      // FIXME:Should this be rule-specific expansion?
+      repo = variable_expand ("$(.C++.PREFIX)");
+      name = req->file->deps->file->name;
+      len = strlen (repo);
+      if (strlen (name) > len && !memcmp (repo, name, len))
+	name += len;
+      req->resp = name;
       req->waiting = 0;
       client->num_awaiting--;
     }
@@ -484,10 +501,16 @@ client_unblock (struct client_state *client, unsigned slot)
   unsigned ix;
   for (ix = client->num_requests; ix--;)
     if (client->requests[ix].waiting)
-      request_unblock (client, &client->requests[ix], slot);
+      request_unblock (client, &client->requests[ix]);
   if (!client->num_awaiting)
     {
       /* Unhide a job.  */
+      if (job_slots)
+	job_slots--;
+      else if (jobserver_enabled ())
+	{
+	  // FIXME: jobserver case.
+	}
       waiting_clients--;
       client_write (client, slot);
     }
@@ -554,20 +577,24 @@ client_read (struct client_state *client, unsigned slot)
     client_process (client, slot);
 }
 
+void
+mapper_finished (void)
+{
+  unsigned slot;
+  if (!waiting_clients)
+    return;
+
+  for (slot = num_clients; slot--;)
+    if (clients[slot]->num_awaiting)
+      client_unblock (clients[slot], slot);
+}
+
 /* Set bits in READERS for clients we're listening to.  */
 
 int
 mapper_pre_pselect (int hwm, fd_set *readers)
 {
   unsigned ix;
-
-  if (waiting_clients)
-    {
-      unsigned slot;
-      for (slot = num_clients; slot--;)
-	if (clients[slot]->num_awaiting)
-	  client_unblock (clients[slot], slot);
-    }
 
   if (sock_fd >=0)
     {
@@ -604,14 +631,21 @@ mapper_post_pselect (int r, fd_set *readers)
   for (ix = num_clients; ix--;)
     if (clients[ix]->reading && FD_ISSET(clients[ix]->fd, readers))
       client_read (clients[ix], ix);
+
+  mapper_finished ();
+
   return r;
 }
 
 pid_t
 mapper_wait (int *status)
 {
+  static int recurse = 0;
   int r;
   sigset_t empty;
+
+  if (recurse++)
+    abort ();
 
   sigemptyset (&empty);
   for (;;)
@@ -631,7 +665,10 @@ mapper_wait (int *status)
 		 so no need to EINTRLOOP here.  */
 	      pid_t pid = waitpid ((pid_t)-1, status, WNOHANG);
 	      if (pid > 0)
-		return pid;
+		{
+		  recurse--;
+		  return pid;
+		}
 	    }
 	    break;
 

@@ -678,6 +678,7 @@ extern double max_load_average;
 extern int mapper_enabled (void);
 extern int mapper_setup (const char *option);
 extern void mapper_clear (void);
+extern void mapper_finished (void);
 extern int mapper_pre_pselect (int, fd_set *);
 extern int mapper_post_pselect (int, fd_set *);
 extern pid_t mapper_wait (int *);
@@ -685,6 +686,7 @@ extern pid_t mapper_wait (int *);
 #define mapper_enabled() (0)
 #define mapper_setup(option) ((void)(option), 0)
 #define mapper_clear() ((void)0)
+#define mapper_finished() ((void)0)
 #define mapper_pre_pselect(R,X) ((void)(X), R)
 #define mapper_post_pselect(R,X) ((void)(X), R)
 #define mapper_wait(XP) (assert (0))

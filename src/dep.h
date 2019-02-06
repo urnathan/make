@@ -129,3 +129,6 @@ struct dep *copy_dep_chain (const struct dep *d);
 struct goaldep *read_all_makefiles (const char **makefiles);
 void eval_buffer (char *buffer, const floc *floc);
 enum update_status update_goal_chain (struct goaldep *goals);
+
+enum update_status force_update_file (struct file *file);
+void force_remake_file (struct file *file);

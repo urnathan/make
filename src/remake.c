@@ -355,6 +355,20 @@ update_file (struct file *file, unsigned int depth)
 
   return status;
 }
+
+enum update_status
+force_update_file (struct file *file)
+{
+  return update_file (file, 0);
+}
+
+void
+force_remake_file (struct file *file)
+{
+  if (file->command_state == cs_not_started)
+    remake_file (file);
+}
+
 
 /* Show a message stating the target failed to build.  */
 
@@ -993,6 +1007,8 @@ notice_finished_file (struct file *file)
     /* Nothing was done for FILE, but it needed nothing done.
        So mark it now as "succeeded".  */
     file->update_status = us_success;
+
+  mapper_finished ();
 }
 
 /* Check whether another file (whose mtime is THIS_MTIME) needs updating on

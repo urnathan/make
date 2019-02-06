@@ -653,6 +653,7 @@ reap_children (int block, int err)
       int child_failed;
       int any_remote, any_local;
       int dontcare;
+      struct file *file;
 
       if (err && block)
         {
@@ -1026,13 +1027,8 @@ reap_children (int block, int err)
          c->file->command_state is still cs_running if all the commands
          ran; notice_finished_file looks for cs_running to tell it that
          it's interesting to check the file's modtime again now.  */
-
-      if (! handling_fatal_signal)
-        /* Notice if the target of the commands has been changed.
-           This also propagates its values for command_state and
-           update_status to its also_make files.  */
-        notice_finished_file (c->file);
-
+      file = c->file;
+      
       /* Block fatal signals while frobnicating the list, so that
          children and job_slots_used are always consistent.  Otherwise
          a fatal signal arriving after the child is off the chain and
@@ -1059,6 +1055,12 @@ reap_children (int block, int err)
       free_child (c);
 
       unblock_sigs ();
+
+      if (! handling_fatal_signal)
+        /* Notice if the target of the commands has been changed.
+           This also propagates its values for command_state and
+           update_status to its also_make files.  */
+        notice_finished_file (file);
 
       /* If the job failed, and the -k flag was not given, die,
          unless we are already in the process of dying.  */
