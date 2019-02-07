@@ -469,10 +469,10 @@ request_unblock (struct client_state *client,
       enum update_status fail;
       struct file *file = req->file->deps->file;
 
-      req->waiting = 2;
       // FIXME: Does this considered nadgering need to be propagated
       // to all incomplete dependencies?
       file->considered--; /* Force it to be considered.  */
+      req->waiting = 2;
       fail = force_update_file (file);
       req->waiting = 1;
 
@@ -500,7 +500,11 @@ request_unblock (struct client_state *client,
 
       /* We do not care about dependencies at this point.  */
       if (req->file->command_state == cs_not_started)
-	force_remake_file (req->file);
+	{
+	  req->waiting = 2;
+	  force_remake_file (req->file);
+	  req->waiting = 3;
+	}
       if (req->file->command_state != cs_finished)
 	return;
       if (req->file->update_status != us_success)
