@@ -1963,6 +1963,10 @@ main (int argc, char **argv, char **envp)
 
   read_files = read_all_makefiles (makefiles == 0 ? 0 : makefiles->list);
 
+  if (module_mapper && !mapper_setup (module_mapper))
+    ON (error, NILF,
+       _("warning: --module-mapper=%s support unavailable."), module_mapper);
+
 #ifdef WINDOWS32
   /* look one last time after reading all Makefiles */
   if (no_default_sh_exe)
@@ -2594,11 +2598,6 @@ main (int argc, char **argv, char **envp)
 
       O (fatal, NILF, _("No targets specified and no makefile found"));
     }
-
-  /* FIXME: Look at variable for value?  */
-  if (module_mapper && !mapper_setup (module_mapper))
-    ON (error, NILF,
-       _("warning: --module-mapper=%s support unavailable."), module_mapper);
 
   /* Update the goals.  */
 

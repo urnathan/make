@@ -30,6 +30,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include "variable.h"
 #include "dep.h"
 #include "job.h"
+#include "rule.h"
 #include "debug.h"
 
 #if defined (HAVE_SYS_WAIT_H) || defined (HAVE_UNION_WAIT)
@@ -67,14 +68,12 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
   C++.<%> : $(C++.PREFIX)%.gcms ;
 
   ## bmi dependency:
-  # {bminame} : {sources} ; $(C++.FORWARD objname)
+  # {bminame} : {sources} | objectname
   # {bminame} : {sources} ; CCrule
   
   $(C++.PREFIX)%.gcm : %.cc | %.o ;
-  $(C++.PREFIX)%.gcmu : % ; \
-  	%(COMPILE.cc) -fmodule-legacy='"$*"' $<
-  $(C++.PREFIX)%.gcms : % ; \
-  	%(COMPILE.cc) -fmodule-legacy='<$*>' $<
+  $(C++.PREFIX)%.gcmu : % ; $(COMPILE.cc) -fmodule-legacy='"$*"' $<
+  $(C++.PREFIX)%.gcms : % ; $(COMPILE.cc) -fmodule-legacy='<$*>' $<
  */
 
 #define MAPPER_VERSION 0
@@ -460,8 +459,8 @@ client_process (struct client_state *client, unsigned slot)
 }
 
 static void
-request_unblock (struct client_state *client,
-		 struct client_request *req)
+check_request_waiting (struct client_state *client,
+		       struct client_request *req)
 {
   if (req->waiting == 1)
     {
@@ -523,12 +522,12 @@ request_unblock (struct client_state *client,
 }
 
 static void
-client_unblock (struct client_state *client, unsigned slot)
+check_client_waiting (struct client_state *client, unsigned slot)
 {
   unsigned ix;
   for (ix = client->num_requests; ix--;)
     if (client->requests[ix].waiting)
-      request_unblock (client, &client->requests[ix]);
+      check_request_waiting (client, &client->requests[ix]);
   if (!client->num_awaiting)
     {
       /* Unpause the job.  This could lead to short-term over commit,
@@ -605,7 +604,7 @@ client_read (struct client_state *client, unsigned slot)
 }
 
 void
-mapper_finished (void)
+mapper_check_waiting (void)
 {
   unsigned slot;
   if (!waiting_clients)
@@ -613,7 +612,7 @@ mapper_finished (void)
 
   for (slot = num_clients; slot--;)
     if (clients[slot]->num_awaiting)
-      client_unblock (clients[slot], slot);
+      check_client_waiting (clients[slot], slot);
 }
 
 /* Set bits in READERS for clients we're listening to.  */
@@ -659,7 +658,7 @@ mapper_post_pselect (int r, fd_set *readers)
     if (clients[ix]->reading && FD_ISSET(clients[ix]->fd, readers))
       client_read (clients[ix], ix);
 
-  mapper_finished ();
+  mapper_check_waiting ();
 
   return r;
 }
@@ -707,6 +706,34 @@ mapper_wait (int *status)
     }
 }
 
+/* Install the implicit rules.  */
+
+static void
+mapper_default_rules (void)
+{
+  static struct pspec rules[] =
+    {
+      {"C++.%", "$(C++.PREFIX)%.gcm", ""},
+      {"C++.\"%\"", "$(C++.PREFIX)%.gcmu", ""},
+      {"C++.<%>", "$(C++.PREFIX)%.gcms", ""},
+
+      {"$(C++.PREFIX)%.gcm", "%.cc | %.o", ""},
+      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc) -fmodule-legacy='\"$*\"' $<"},
+      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc) -fmodule-legacy='<$*>' $<"},
+	
+      {0, 0, 0}
+    };
+  
+  struct pspec *p;
+
+  for (p = rules; p->target; p++)
+    {
+      if (p->target[0] == '$')
+	p->target = xstrdup (variable_expand (p->target));
+      install_pattern_rule (p, 0);
+    }
+}
+
 /* Non-zero if the mapper is running.  */
 
 int
@@ -718,7 +745,7 @@ mapper_enabled (void)
 /* Setup a socket according to bound to the address OPTION.
    Listen for connections.
    Returns non-zero.  */
-// "=/tmp/make-mapper-$(shell echo $$$$)", 
+
 int
 mapper_setup (const char *option)
 {
@@ -833,6 +860,9 @@ mapper_setup (const char *option)
 	     "failed %s of mapper `%s': %s", errmsg, option, arg);
       free (writable);
     }
+
+  if (!no_builtin_rules_flag)
+    mapper_default_rules ();
 
   return 1;
 }

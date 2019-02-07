@@ -1008,7 +1008,7 @@ notice_finished_file (struct file *file)
        So mark it now as "succeeded".  */
     file->update_status = us_success;
 
-  mapper_finished ();
+  mapper_check_waiting ();
 }
 
 /* Check whether another file (whose mtime is THIS_MTIME) needs updating on
