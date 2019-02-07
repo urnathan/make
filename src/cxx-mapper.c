@@ -446,8 +446,9 @@ client_process (struct client_state *client, unsigned slot)
 
   if (client->num_awaiting)
     {
-      // FIXME: This accounting is wrong -- the thing we're waiting on
-      // might already be running
+      /* Even though the thing we're waiting on might have already
+         started, it is still correct to note that we're paused, so
+         that something else can run while we wait.  */
       DB (DB_JOBS, ("Pausing job\n"));
       jobs_paused++;
       if (job_slots)
@@ -469,20 +470,25 @@ request_unblock (struct client_state *client,
       struct file *file = req->file->deps->file;
 
       req->waiting = 2;
+      // FIXME: Does this considered nadgering need to be propagated
+      // to all incomplete dependencies?
       file->considered--; /* Force it to be considered.  */
       fail = force_update_file (file);
       req->waiting = 1;
-      if (fail)
-	abort (); // FIXME: error path
 
-      /* Waiting for BMI.  */
-      if (file->command_state != cs_finished)
+      /* Not ready yet.  */
+      if (!fail && file->command_state != cs_finished)
 	return;
 
       if (file->update_status != us_success)
-	abort (); // FIXME: error path
-
-      req->waiting = 3;
+	{
+	  req->resp = "Failed to build";
+	  req->code = CC_ERROR;
+	  req->waiting = 0;
+	  client->num_awaiting--;
+	}
+      else
+	req->waiting = 3;
     }
   
   if (req->waiting == 3)
@@ -521,7 +527,9 @@ client_unblock (struct client_state *client, unsigned slot)
       request_unblock (client, &client->requests[ix]);
   if (!client->num_awaiting)
     {
-      /* Unhide a job.  */
+      /* Unpause the job.  This could lead to short-term over commit,
+	 as we may have a still-running job borrowing the paused
+	 slot.  */
       DB (DB_JOBS, ("Unpausing job\n"));
       jobs_paused--;
       if (job_slots)
