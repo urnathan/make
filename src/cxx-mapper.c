@@ -62,15 +62,15 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
   # module name-> bmi name mapping
   # C++.{modulename} : {bminame} ; @#nop
-  C++.% : $(C++.PREFIX)%.gcm ; @#nop
-  C++."%" : $(C++.PREFIX)%.gcmu ; @#nop
-  C++.<%> : $(C++.PREFIX)%.gcms ; @#nop
+  C++.% : $(C++.PREFIX)%.gcm ;
+  C++."%" : $(C++.PREFIX)%.gcmu ;
+  C++.<%> : $(C++.PREFIX)%.gcms ;
 
   ## bmi dependency:
   # {bminame} : {sources} ; $(C++.FORWARD objname)
   # {bminame} : {sources} ; CCrule
   
-  $(C++.PREFIX)%.gcm : %.cc ; $(C++.FORWARD $*.o)
+  $(C++.PREFIX)%.gcm : %.cc | %.o ;
   $(C++.PREFIX)%.gcmu : % ; \
   	%(COMPILE.cc) -fmodule-legacy='"$*"' $<
   $(C++.PREFIX)%.gcms : % ; \
@@ -160,7 +160,7 @@ new_client (void)
       clients = xrealloc (clients, alloc_clients * sizeof (*clients));
     }
 
-  DB (DB_PLUGIN, ("module:new connection, client:%u\n", client->cix));
+  DB (DB_PLUGIN, ("module:%u connected\n", client->cix));
 
   clients[num_clients++] = client;
 }
@@ -168,7 +168,7 @@ new_client (void)
 static void
 delete_client (struct client_state *client, unsigned slot)
 {
-  DB (DB_PLUGIN, ("module:destroying client:%u\n", client->cix));
+  DB (DB_PLUGIN, ("module:%u destroyed\n", client->cix));
   close (client->fd);
   free (client->buf);
   free (client->requests);
@@ -203,7 +203,8 @@ client_print (struct client_state *client, const char *fmt, ...)
       if (actual < space)
 	break;
     }
-  DB (DB_PLUGIN, ("module:sending '%.*s'\n", (int)(actual + client->corking),
+  DB (DB_PLUGIN, ("module:%u sending '%.*s'\n",
+		  client->cix, (int)(actual + client->corking),
 		  &client->buf[client->buf_pos - client->corking]));
   client->buf_pos += actual;
   client->buf[client->buf_pos++] = '\n';
@@ -243,14 +244,18 @@ client_parse (struct client_state *client)
   resp->file = NULL;
   resp->resp = "Unknown request";
 
-  DB (DB_PLUGIN, ("module:processing '%s'\n", &client->buf[client->buf_pos]));
+  DB (DB_PLUGIN, ("module:%u processing '%s'\n",
+		  client->cix, &client->buf[client->buf_pos]));
   if (client->buf[client->buf_pos] == '+'
       || client->buf[client->buf_pos] == '-')
     client->buf_pos++;
 
   token = client_token (client);
   if (!token)
-    return 1;
+    {
+      client->buf_pos++;
+      return 1;
+    }
   else if (client->handshake)
     {
       if (!strcmp (token, "HELLO"))
@@ -314,6 +319,12 @@ client_parse (struct client_state *client)
 		    break;
 		  }
 
+		if (req == CC_DONE)
+		  {
+		    /* Ignore DONE for the moment.  */
+		    break;
+		  }
+
 		if (!f)
 		  {
 		    f = enter_file (strcache_add (target_name));
@@ -368,7 +379,7 @@ client_write (struct client_state *client, unsigned slot)
 	case CC_HANDSHAKE:
 	  {
 	    char *repo = variable_expand ("$(.C++.PREFIX)");
-	    client_print (client, "OK %u GNUMake %s", MAPPER_VERSION, repo);
+	    client_print (client, "HELLO %u GNUMake %s", MAPPER_VERSION, repo);
 	  }
 	  break;
 
@@ -435,10 +446,12 @@ client_process (struct client_state *client, unsigned slot)
 
   if (client->num_awaiting)
     {
+      // FIXME: This accounting is wrong -- the thing we're waiting on
+      // might already be running
+      DB (DB_JOBS, ("Pausing job\n"));
+      jobs_paused++;
       if (job_slots)
 	job_slots++;
-      else if (jobserver_enabled ())
-	abort (); // FIXME: Jobserver case.
       waiting_clients++;
     }
   else
@@ -452,16 +465,22 @@ request_unblock (struct client_state *client,
   if (req->waiting == 1)
     {
       /* IMPORT, building bmi.  */
-      req->waiting = 2;
-      force_update_file (req->file->deps->file);
-    }
+      enum update_status fail;
+      struct file *file = req->file->deps->file;
 
-  if (req->waiting == 2)
-    {
+      req->waiting = 2;
+      file->considered--; /* Force it to be considered.  */
+      fail = force_update_file (file);
+      req->waiting = 1;
+      if (fail)
+	abort (); // FIXME: error path
+
       /* Waiting for BMI.  */
-      if (req->file->deps->file->command_state != cs_finished
-	  || req->file->deps->file->update_status != us_success)
+      if (file->command_state != cs_finished)
 	return;
+
+      if (file->update_status != us_success)
+	abort (); // FIXME: error path
 
       req->waiting = 3;
     }
@@ -473,11 +492,9 @@ request_unblock (struct client_state *client,
       const char *name;
       size_t len;
 
+      /* We do not care about dependencies at this point.  */
       if (req->file->command_state == cs_not_started)
-	{
-	  force_remake_file (req->file);
-	  return;
-	}
+	force_remake_file (req->file);
       if (req->file->command_state != cs_finished)
 	return;
       if (req->file->update_status != us_success)
@@ -505,12 +522,10 @@ client_unblock (struct client_state *client, unsigned slot)
   if (!client->num_awaiting)
     {
       /* Unhide a job.  */
+      DB (DB_JOBS, ("Unpausing job\n"));
+      jobs_paused--;
       if (job_slots)
 	job_slots--;
-      else if (jobserver_enabled ())
-	{
-	  // FIXME: jobserver case.
-	}
       waiting_clients--;
       client_write (client, slot);
     }
@@ -538,7 +553,7 @@ client_read (struct client_state *client, unsigned slot)
       return;
     }
 
-  DB (DB_PLUGIN, ("module:client:%u read %u bytes '%.*s'\n",
+  DB (DB_PLUGIN, ("module:%u read %u bytes '%.*s'\n",
 		  client->cix, (unsigned) bytes,
 		  (int) bytes, client->buf + client->buf_pos));
 

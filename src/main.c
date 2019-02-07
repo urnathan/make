@@ -751,7 +751,7 @@ decode_debug_flags (void)
                 db_level |= DB_JOBS;
                 break;
               case 'm':
-                db_level |= DB_BASIC | DB_MAKEFILES;
+                db_level |= DB_MAKEFILES;
                 break;
               case 'n':
                 db_level = 0;
@@ -3430,18 +3430,17 @@ clean_jobserver (int status)
      have written all our tokens so do that now.  If tokens are left
      after any other error code, that's bad.  */
 
-  if (jobserver_enabled() && jobserver_tokens)
+  if (jobserver_enabled() && (jobserver_tokens -= jobs_borrowed))
     {
       if (status != 2)
         ON (error, NILF,
             "INTERNAL: Exiting with %u jobserver tokens (should be 0)!",
             jobserver_tokens);
       else
-        /* Don't write back the "free" token */
-        while (--jobserver_tokens)
-          jobserver_release (0);
+	/* Don't write back the "free" token */
+	while (--jobserver_tokens)
+	  jobserver_release (0);
     }
-
 
   /* Sanity: If we're the master, were all the tokens written back?  */
 

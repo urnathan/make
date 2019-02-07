@@ -179,6 +179,7 @@ void
 jobserver_release (int is_fatal)
 {
   int r;
+
   EINTRLOOP (r, write (job_fds[1], &token, 1));
   if (r != 1)
     {
@@ -186,6 +187,7 @@ jobserver_release (int is_fatal)
         pfatal_with_name (_("write jobserver"));
       perror_with_name ("write", "");
     }
+  DB (DB_JOBS, ("Released a token\n"));
 }
 
 unsigned int
@@ -331,7 +333,11 @@ jobserver_acquire (int timeout)
 
 	  /* read() should never return 0: only the master make can reap all the
 	     tokens and close the write side...??  */
-	  return r > 0;
+	  if (!r)
+	    return 0;
+	  
+	  DB (DB_JOBS, ("Acquired a token\n"));
+	  return 1;
 	}
     }
 }
@@ -434,7 +440,10 @@ jobserver_acquire (int timeout)
   set_child_handler_action_flags (0, timeout);
 
   if (got_token == 1)
-    return 1;
+    {
+      DB (DB_JOBS, ("Acquired a token\n"));
+      return 1;
+    }
 
   /* If the error _wasn't_ expected (EINTR or EBADF), fatal.  Otherwise,
      go back and reap_children(), and try again.  */

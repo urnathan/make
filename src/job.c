@@ -232,6 +232,11 @@ struct child *children = 0;
 
 unsigned int job_slots_used = 0;
 
+#if MAKE_CXX_MAPPER
+unsigned int jobs_paused;
+unsigned int jobs_borrowed;
+#endif
+
 /* Nonzero if the 'good' standard input is in use.  */
 
 static int good_stdin_used = 0;
@@ -1042,8 +1047,8 @@ reap_children (int block, int err)
                         c, pid2str (c->pid), c->remote ? _(" (remote)") : ""));
 
           /* There is now another slot open.  */
-          if (job_slots_used > 0)
-            --job_slots_used;
+	  if (job_slots_used > 0)
+	    --job_slots_used;
         }
 
       /* Remove the child from the chain and free it.  */
@@ -1090,11 +1095,11 @@ free_child (struct child *child)
   /* If we're using the jobserver and this child is not the only outstanding
      job, put a token back into the pipe for it.  */
 
-  if (jobserver_enabled () && jobserver_tokens > 1)
+  if (jobserver_enabled () && jobserver_tokens > 1 && !job_return ())
     {
       jobserver_release (1);
       DB (DB_JOBS, (_("Released token for child %p (%s).\n"),
-                    child, child->file->name));
+		    child, child->file->name));
     }
 
   --jobserver_tokens;
@@ -1619,7 +1624,7 @@ start_waiting_job (struct child *c)
                         c, c->file->name, pid2str (c->pid),
                         c->remote ? _(" (remote)") : ""));
           /* One more job slot is in use.  */
-          ++job_slots_used;
+	  ++job_slots_used;
         }
       children = c;
       unblock_sigs ();
@@ -1809,7 +1814,7 @@ new_job (struct file *file)
      just once).  Also more thought needs to go into the entire algorithm;
      this is where the old parallel job code waits, so...  */
 
-  else if (jobserver_enabled ())
+  else if (jobserver_enabled () && !job_borrow ())
     while (1)
       {
         int got_token;

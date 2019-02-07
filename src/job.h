@@ -81,3 +81,15 @@ void unblock_all_sigs (void);
 
 extern unsigned int job_slots_used;
 extern unsigned int jobserver_tokens;
+
+#if MAKE_CXX_MAPPER
+extern unsigned int jobs_paused;
+extern unsigned int jobs_borrowed;
+#define job_borrow() (jobs_paused > jobs_borrowed ? jobs_borrowed++, 1 : 0)
+#define job_return() (jobs_borrowed ? jobs_borrowed--, 1 : 0)
+#else
+#define jobs_paused 0
+#define jobs_borrowed 0
+#define job_borrow() 0
+#define job_return() 0
+#endif
