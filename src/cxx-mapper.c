@@ -744,14 +744,14 @@ mapper_enabled (void)
 
 /* Setup a socket according to bound to the address OPTION.
    Listen for connections.
-   Returns non-zero.  */
+   Returns non-zero if enabled.  */
 
 int
 mapper_setup (const char *option)
 {
   int err = 0;
   const char *errmsg = NULL;
-  size_t len;
+  size_t len = 0;
 #ifdef NETWORKING
   int af = AF_UNSPEC;
 #ifdef HAVE_AF_UNIX
@@ -761,27 +761,32 @@ mapper_setup (const char *option)
 #endif
   char *writable;
 
-  if (option[0] == '?')
+  if (!option || !option[0])
     {
-      sock_cookie = xstrdup (option + 1);
-      option = "";
+      option = variable_expand ("$(CXX_MODULE_MAPPER)");
+      if (!option[0])
+	return 0;
     }
-  if (option[0])
+
+  sock_cookie = strchr (option, '?');
+  if (sock_cookie)
     {
-      writable = xstrdup (option);
-      if (!sock_cookie)
-	{
-	  sock_cookie = strchr (writable, '?');
-	  if (sock_cookie)
-	    *sock_cookie++ = 0;
-	}
-      len = strlen (writable);
+      len = sock_cookie - option;
+      sock_cookie = xstrdup (sock_cookie + 1);
     }
   else
+    len = strlen (option);
+
+  if (!len || (option[0] == '=' && len == 1))
     {
       pid_t pid = getpid ();
       writable = xmalloc (30);
       len = snprintf (writable, 30, "=/tmp/make-mapper-%d", (int)pid);
+    }
+  else
+    {
+      writable = xstrdup (option);
+      writable[len] = 0;
     }
 
   /* Does it look like a socket?  */
