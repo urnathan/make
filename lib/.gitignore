@@ -9,3 +9,18 @@
 !/glob.in.h
 /glob.h
 
+/Makefile.am
+/_Noreturn.h
+/alloca.c
+/alloca.in.h
+/arg-nonnull.h
+/c++defs.h
+/getloadavg.c
+/intprops.h
+/stdbool.in.h
+/stddef.in.h
+/stdlib.in.h
+/sys_types.in.h
+/unistd.c
+/unistd.in.h
+/warn-on-use.h
