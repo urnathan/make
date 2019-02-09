@@ -99,6 +99,8 @@ struct client_request
 
 struct client_state 
 {
+  struct child *job;  /* The job this is for.  */
+
   char *buf;
   size_t buf_size;
   size_t buf_pos;
@@ -107,7 +109,6 @@ struct client_state
   int fd;
 
   int reading : 1;  /* Filling read buffer.  */
-  int handshake : 1;  /* Expecting Handshake.  */
   int bol : 1;
   int last : 1;
   int corking : 16;  /* number of lines, if corked.  */
@@ -119,7 +120,6 @@ struct client_state
 
 static int sock_fd = -1;
 static char *sock_name = NULL;
-static char *sock_cookie = NULL;
 static struct client_state **clients = NULL;
 static unsigned num_clients = 0;
 static unsigned alloc_clients = 0;
@@ -142,8 +142,9 @@ new_client (void)
   client = xmalloc (sizeof (*client));
   memset (client, 0, sizeof (*client));
   client->cix = ++factory;
+  client->job = NULL;  /* Discovered during handshake.  */
   client->fd = client_fd;
-  client->reading = client->handshake = 1;
+  client->reading = 1;
   client->buf_size = 10; /* Exercise expansion.  */
   client->buf = xmalloc (client->buf_size);
 
@@ -232,6 +233,23 @@ client_token (struct client_state *client)
   return token;
 }
 
+/* Generate the BMI name from the dependency of file, removing the
+   prefix.   */
+
+static const char *
+bmi_name (struct file *file)
+{
+  /* Not a rule-specific expansion.  */
+  char *repo = variable_expand ("$(.C++.PREFIX)");
+  const char *name = file->deps->file->name;
+  size_t len = strlen (repo);
+
+  if (strlen (name) > len && !memcmp (repo, name, len))
+    name += len;
+
+  return name;
+}
+
 static int
 client_parse (struct client_state *client)
 {
@@ -255,7 +273,7 @@ client_parse (struct client_state *client)
       client->buf_pos++;
       return 1;
     }
-  else if (client->handshake)
+  else if (!client->job)
     {
       if (!strcmp (token, "HELLO"))
 	{
@@ -263,13 +281,17 @@ client_parse (struct client_state *client)
 	  const char *ver = client_token (client);
 	  const char *compiler = ver ? client_token (client) : NULL;
 	  char *ident = &client->buf[client->buf_pos];
-	  (void)compiler;
+	  char *e = ident;
+	  unsigned long cookie = ident ? strtoul (ident, &e, 0) : 0;
+	  struct child *job = ident && !*e
+	    ? find_job_by_cookie ((void *)cookie) : NULL;
 
-	  if (sock_cookie && strcmp (sock_cookie, ident))
-	    resp->resp = "Ident mismatch";
+	  (void)compiler;
+	  if (!job)
+	    resp->resp = "Cannot find matching job";
 	  else
 	    {
-	      client->handshake = 0;
+	      client->job = job;
 	      req = CC_HANDSHAKE;
 	    }
 	}
@@ -335,16 +357,24 @@ client_parse (struct client_state *client)
 		  }
 		free (target_name);
 
-		if (f->deps && !f->deps->next)
-		  {
-		    resp->file = f;
-		    resp->waiting = req == CC_IMPORT ? 1 : 3;
-		    client->num_awaiting++;
-		  }
-		else
+		/* There should be exactly one dependency.  */
+		if (!f->deps)
 		  {
 		    resp->resp = "Unknown module name";
 		    req = CC_ERROR;
+		  }
+		else if (f->deps->next)
+		  {
+		    resp->resp = "Ambiguous module name";
+		    req = CC_ERROR;
+		  }
+		else if (req == CC_EXPORT)
+		  resp->resp = bmi_name (f);
+		else
+		  {
+		    resp->file = f;
+		    resp->waiting = 1;
+		    client->num_awaiting++;
 		  }
 		break;
 	      }
@@ -464,6 +494,7 @@ check_request_waiting (struct client_state *client,
 {
   if (req->waiting == 1)
     {
+      // FIXME Collapse to just building req->file.
       /* IMPORT, building bmi.  */
       enum update_status fail;
       struct file *file = req->file->deps->file;
@@ -481,7 +512,7 @@ check_request_waiting (struct client_state *client,
 
       if (file->update_status != us_success)
 	{
-	  req->resp = "Failed to build";
+	  req->resp = "Failed to build module";
 	  req->code = CC_ERROR;
 	  req->waiting = 0;
 	  client->num_awaiting--;
@@ -493,29 +524,27 @@ check_request_waiting (struct client_state *client,
   if (req->waiting == 3)
     {
       /* Doing commands.  */
-      char *repo;
-      const char *name;
-      size_t len;
+      enum update_status fail;
+      struct file *file = req->file;
 
-      /* We do not care about dependencies at this point.  */
-      if (req->file->command_state == cs_not_started)
-	{
-	  req->waiting = 2;
-	  force_remake_file (req->file);
-	  req->waiting = 3;
-	}
-      if (req->file->command_state != cs_finished)
+      // FIXME: Does this considered nadgering need to be propagated
+      // to all incomplete dependencies?
+      file->considered--; /* Force it to be considered.  */
+      req->waiting = 2;
+      fail = force_update_file (file);
+      req->waiting = 3;
+
+      /* Not ready yet.  */
+      if (!fail && file->command_state != cs_finished)
 	return;
+
       if (req->file->update_status != us_success)
-	return;
-
-      // FIXME:Should this be rule-specific expansion?
-      repo = variable_expand ("$(.C++.PREFIX)");
-      name = req->file->deps->file->name;
-      len = strlen (repo);
-      if (strlen (name) > len && !memcmp (repo, name, len))
-	name += len;
-      req->resp = name;
+	{
+	  req->resp = "Failed to build";
+	  req->code = CC_ERROR;
+	}
+      else
+	req->resp = bmi_name (req->file);
       req->waiting = 0;
       client->num_awaiting--;
     }
@@ -717,9 +746,11 @@ mapper_default_rules (void)
       {"C++.\"%\"", "$(C++.PREFIX)%.gcmu", ""},
       {"C++.<%>", "$(C++.PREFIX)%.gcms", ""},
 
+      // FIXME: Add other C++ suffixes
       {"$(C++.PREFIX)%.gcm", "%.cc | %.o", ""},
-      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc) -fmodule-legacy='\"$*\"' $<"},
-      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc) -fmodule-legacy='<$*>' $<"},
+      // FIXME: Wrap -fmodule-legacy into a variable/fn
+      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc) -fmodule-legacy='\"$*\"' $(OUTPUT_OPTION) $<"},
+      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc) -fmodule-legacy='<$*>' $(OUTPUT_OPTION) $<"},
 	
       {0, 0, 0}
     };
@@ -763,21 +794,13 @@ mapper_setup (const char *option)
 
   if (!option || !option[0])
     {
-      option = variable_expand ("$(CXX_MODULE_MAPPER)");
-      if (!option[0])
+      char *var = variable_expand ("$(CXX_MODULE_MAPPER)");
+      if (!var[0] && !option)
 	return 0;
+      option = var;
     }
 
-  sock_cookie = strchr (option, '?');
-  if (sock_cookie)
-    {
-      len = sock_cookie - option;
-      sock_cookie = xstrdup (sock_cookie + 1);
-    }
-  else
-    len = strlen (option);
-
-  if (!len || (option[0] == '=' && len == 1))
+  if (!option[0] || (option[0] == '=' && !option[1]))
     {
       pid_t pid = getpid ();
       writable = xmalloc (30);
@@ -786,7 +809,7 @@ mapper_setup (const char *option)
   else
     {
       writable = xstrdup (option);
-      writable[len] = 0;
+      len = strlen (option);
     }
 
   /* Does it look like a socket?  */
@@ -843,15 +866,9 @@ mapper_setup (const char *option)
 
   if (sock_name && !errmsg)
     {
+      /* Force it to be undefined now, and we'll define it per-job.  */
       const char *name = "CXX_MODULE_MAPPER";
-      char *val = sock_name;
-      struct variable *var;
-
-      if (sock_cookie)
-	val = xstrdup (concat (3, val, "?", sock_cookie));
-      var = define_variable_global (name, strlen (name), val,
-				    o_command, 0, NILF);
-      var->export = v_export;
+      undefine_variable_global (name, strlen (name), o_automatic);
     }
   else
     {
@@ -870,6 +887,18 @@ mapper_setup (const char *option)
     mapper_default_rules ();
 
   return 1;
+}
+
+char *
+mapper_ident (void *cookie)
+{
+  char *assn;
+  
+  if (!sock_name)
+    return 0;
+  assn = xmalloc (100);
+  sprintf (assn, "CXX_MODULE_MAPPER=%s?%#lx", sock_name, (unsigned long)cookie);
+  return assn;
 }
 
 void

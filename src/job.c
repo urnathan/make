@@ -1890,7 +1890,7 @@ new_job (struct file *file)
      (This will notice if there is in fact no recipe.)  */
   start_waiting_job (c);
 
-  if (job_slots == 1 || not_parallel)
+  if (/*job_slots == 1 ||*/ not_parallel)
     /* Since there is only one job slot, make things run linearly.
        Wait for the child to die, setting the state to 'cs_finished'.  */
     while (file->command_state == cs_running)
@@ -3659,6 +3659,19 @@ construct_command_argv (char *line, char **restp, struct file *file,
 #endif /* !VMS */
   return argv;
 }
+
+struct child *
+find_job_by_cookie (void *cookie)
+{
+  struct child *c;
+
+  for (c = children; c; c = c->next)
+    if (c->file == cookie)
+      return c;
+
+  return NULL;
+}
+
 
 #if !defined(HAVE_DUP2) && !defined(_AMIGA)
 int

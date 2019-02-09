@@ -48,6 +48,7 @@ struct child
     unsigned int  deleted:1;    /* Nonzero if targets have been deleted.  */
     unsigned int  recursive:1;  /* Nonzero for recursive command ('+' etc.)  */
     unsigned int  dontcare:1;   /* Saved dontcare flag.  */
+    unsigned int  blocked:1;	/* Blocked pending a module dependency.  */
   };
 
 extern struct child *children;
@@ -58,6 +59,7 @@ int is_bourne_compatible_shell(const char *path);
 void new_job (struct file *file);
 void reap_children (int block, int err);
 void start_waiting_jobs (void);
+struct child *find_job_by_cookie (void *cookie);
 
 char **construct_command_argv (char *line, char **restp, struct file *file,
                                int cmd_flags, char** batch_file);

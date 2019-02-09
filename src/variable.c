@@ -985,9 +985,10 @@ target_environment (struct file *file)
   struct hash_table table;
   struct variable **v_slot;
   struct variable **v_end;
-  struct variable makelevel_key;
+  struct variable key;
   char **result_0;
   char **result;
+  char *assn;
 
   if (file == 0)
     set_list = current_variable_set_list;
@@ -1068,11 +1069,18 @@ target_environment (struct file *file)
           }
     }
 
-  makelevel_key.name = (char *)MAKELEVEL_NAME;
-  makelevel_key.length = MAKELEVEL_LENGTH;
-  hash_delete (&table, &makelevel_key);
+  result = result_0 = xmalloc ((table.ht_fill + 3) * sizeof (char *));
 
-  result = result_0 = xmalloc ((table.ht_fill + 2) * sizeof (char *));
+  key.name = (char *)MAKELEVEL_NAME;
+  key.length = MAKELEVEL_LENGTH;
+  hash_delete (&table, &key);
+  assn = xmalloc (100);
+  sprintf (assn, "%s=%u", MAKELEVEL_NAME, makelevel + 1);
+  *result++ = assn;
+
+  assn = mapper_ident (file);
+  if (assn)
+    *result++ = assn;
 
   v_slot = (struct variable **) table.ht_vec;
   v_end = v_slot + table.ht_size;
@@ -1107,9 +1115,7 @@ target_environment (struct file *file)
           }
       }
 
-  *result = xmalloc (100);
-  sprintf (*result, "%s=%u", MAKELEVEL_NAME, makelevel + 1);
-  *++result = 0;
+  *result = 0;
 
   hash_free (&table, 0);
 
