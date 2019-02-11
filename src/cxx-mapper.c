@@ -63,9 +63,9 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
   # module name-> bmi name mapping
   # C++.{modulename} : {bminame} ; @#nop
-  C++.% : $(C++.PREFIX)%.gcm ;
-  C++."%" : $(C++.PREFIX)%.gcmu ;
-  C++.<%> : $(C++.PREFIX)%.gcms ;
+  %.c++m : $(C++.PREFIX)%.gcm ;
+  "%".c++m : $(C++.PREFIX)%.gcmu ;
+  <%>.c++m : $(C++.PREFIX)%.gcms ;
 
   ## bmi dependency:
   # {bminame} : {sources} | objectname
@@ -80,6 +80,8 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #define LEGACY_VAR "CXX_MODULE_LEGACY"
 #define MAPPER_VAR "CXX_MODULE_MAPPER"
+#define MODULE_SUFFIX "c++m"
+#define BMI_SUFFIX "gcm"
 
 enum response_codes
 {
@@ -325,13 +327,13 @@ client_parse (struct client_state *client)
 	      }
 	    else
 	      {
-		/* look for a target called C++.{modulename}.  */
+		/* look for a target called {modulename}.{MODULE_SUFFIX}  */
 		size_t len = strlen (operand);
-		char *target_name = xmalloc (len + 6);
+		char *target_name = xmalloc (len + 2 + strlen (MODULE_SUFFIX));
 		struct file *f;
 
-		strcpy (target_name, "C++.");
-		memcpy (target_name + 4, operand, len + 1);
+		memcpy (target_name, operand, len);
+		strcpy (target_name + len, "." MODULE_SUFFIX);
 
 		f = lookup_file (target_name);
 		if (req == CC_INCLUDE)
@@ -707,18 +709,18 @@ mapper_default_rules (void)
 {
   static struct pspec rules[] =
     {
-      {"C++.\"%\"", "$(C++.PREFIX)%.gcmu", ""},
-      {"C++.<%>", "$(C++.PREFIX)%.gcms", ""},
-      {"C++.%", "$(C++.PREFIX)%.gcm", ""},
+      {"\"%\"." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX "u", ""},
+      {"<%>." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX "s", ""},
+      {"%." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX, ""},
 
       /* Order Only! */
-      {"$(C++.PREFIX)%.gcm", "%.cc | %.o", ""},
-      {"$(C++.PREFIX)%.gcm", "%.cxx | %.o", ""},
-      {"$(C++.PREFIX)%.gcm", "%.cpp | %.o", ""},
+      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cc | %.o", ""},
+      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cxx | %.o", ""},
+      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cpp | %.o", ""},
 
-      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc)"
+      {"$(C++.PREFIX)%." BMI_SUFFIX "u", "%", "$(COMPILE.cc)"
        " $(call " LEGACY_VAR ",\"$*\") $(OUTPUT_OPTION) $<"},
-      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc)"
+      {"$(C++.PREFIX)%." BMI_SUFFIX "s", "%", "$(COMPILE.cc)"
        " $(call " LEGACY_VAR ",<$*>) $(OUTPUT_OPTION) $<"},
 	
       {0, 0, 0}
