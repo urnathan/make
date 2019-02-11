@@ -57,6 +57,8 @@ unsigned int commands_started = 0;
 static struct goaldep *goal_list;
 static struct dep *goal_dep;
 
+static struct dep *new_deps;
+
 /* Current value for pruning the scan of the goal chain.
    All files start with considered == 0.  */
 static unsigned int considered = 0;
@@ -99,7 +101,7 @@ update_goal_chain (struct goaldep *goaldeps)
 
   /* Update all the goals until they are all finished.  */
 
-  while (goals != 0)
+  while (goals != 0 || new_deps)
     {
       struct dep *g, *lastgoal;
 
@@ -107,9 +109,19 @@ update_goal_chain (struct goaldep *goaldeps)
 
       start_waiting_jobs ();
 
-      /* Wait for a child to die.  */
-
-      reap_children (1, 0);
+      if (new_deps)
+	{
+	  for (g = new_deps; g; g = lastgoal)
+	    {
+	      lastgoal = g->next;
+	      g->next = goals;
+	      goals = g;
+	    }
+	  new_deps = NULL;
+	}
+      else
+	/* Wait for a child to die.  */
+	reap_children (1, 0);
 
       lastgoal = 0;
       g = goals;
@@ -251,7 +263,9 @@ update_goal_chain (struct goaldep *goaldeps)
       /* If we reached the end of the dependency graph update CONSIDERED
          for the next pass.  */
       if (g == 0)
-        ++considered;
+	{
+	  ++considered;
+	}
     }
 
   if (rebuilding_makefiles)
@@ -263,6 +277,20 @@ update_goal_chain (struct goaldep *goaldeps)
 
   return status;
 }
+
+#if MAKE_CXX_MAPPER
+void
+add_mapper_goal (struct file *file)
+{
+  struct dep *goal = alloc_dep ();
+
+  file->mapper_target = 1;
+  goal->file = file;
+  goal->next = new_deps;
+  new_deps = goal;
+}
+#endif
+
 
 /* If we're rebuilding an included makefile that failed, and we care
    about errors, show an error message the first time.  */
@@ -354,19 +382,6 @@ update_file (struct file *file, unsigned int depth)
     }
 
   return status;
-}
-
-enum update_status
-force_update_file (struct file *file)
-{
-  return update_file (file, 0);
-}
-
-void
-force_remake_file (struct file *file)
-{
-  if (file->command_state == cs_not_started)
-    remake_file (file);
 }
 
 
@@ -888,6 +903,8 @@ notice_finished_file (struct file *file)
 
   file->command_state = cs_finished;
   file->updated = 1;
+  if (file->mapper_target)
+    mapper_file_finish (file);
 
   if (touch_flag
       /* The update status will be:
@@ -996,6 +1013,9 @@ notice_finished_file (struct file *file)
         d->file->updated = 1;
         d->file->update_status = file->update_status;
 
+	if (d->file->mapper_target)
+	  mapper_file_finish (d->file);
+
         if (ran && !d->file->phony)
           /* Fetch the new modification time.
              We do this instead of just invalidating the cached time
@@ -1007,8 +1027,6 @@ notice_finished_file (struct file *file)
     /* Nothing was done for FILE, but it needed nothing done.
        So mark it now as "succeeded".  */
     file->update_status = us_success;
-
-  mapper_check_waiting ();
 }
 
 /* Check whether another file (whose mtime is THIS_MTIME) needs updating on

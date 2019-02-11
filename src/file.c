@@ -797,6 +797,8 @@ set_command_state (struct file *file, enum cmd_state state)
 {
   struct dep *d;
 
+  assert (state != cs_finished);
+
   file->command_state = state;
 
   for (d = file->also_make; d != 0; d = d->next)

@@ -368,10 +368,14 @@ client_parse (struct client_state *client)
 		    resp->resp = "Ambiguous module name";
 		    req = CC_ERROR;
 		  }
-		else if (req == CC_EXPORT)
+		else if (req == CC_EXPORT
+			 || f->command_state == cs_finished)
+		  // FIXME: note of build failing?
 		  resp->resp = bmi_name (f);
 		else
 		  {
+		    if (!f->mapper_target)
+		      add_mapper_goal (f);
 		    resp->file = f;
 		    resp->waiting = 1;
 		    client->num_awaiting++;
@@ -459,7 +463,7 @@ client_write (struct client_state *client, unsigned slot)
   client->reading = 1;
 }
 
-static void
+static int
 client_process (struct client_state *client, unsigned slot)
 {
   unsigned reqs = client->corking + !client->corking;
@@ -486,94 +490,51 @@ client_process (struct client_state *client, unsigned slot)
     }
   else
     client_write (client, slot);
+
+  return client->num_awaiting != 0;
 }
 
-static void
-check_request_waiting (struct client_state *client,
-		       struct client_request *req)
+void
+mapper_file_finish (struct file *f)
 {
-  if (req->waiting == 1)
-    {
-      // FIXME Collapse to just building req->file.
-      /* IMPORT, building bmi.  */
-      enum update_status fail;
-      struct file *file = req->file->deps->file;
+  unsigned slot, ix;
 
-      // FIXME: Does this considered nadgering need to be propagated
-      // to all incomplete dependencies?
-      file->considered--; /* Force it to be considered.  */
-      req->waiting = 2;
-      fail = force_update_file (file);
-      req->waiting = 1;
+  /* Do backwards because completion could delete a client.  */
+  for (slot = num_clients; slot--;)
+    if (clients[slot]->num_awaiting)
+      {
+	struct client_state *client = clients[slot];
+	for (ix = client->num_requests; ix--;)
+	  {
+	    struct client_request *req = &client->requests[ix];
 
-      /* Not ready yet.  */
-      if (!fail && file->command_state != cs_finished)
-	return;
+	    if (req->waiting && req->file == f)
+	      {
+		// FIXME: failure code?
+		req->waiting = 0;
+		req->resp = bmi_name (req->file);
+		client->num_awaiting--;
+	      }
+	  }
 
-      if (file->update_status != us_success)
-	{
-	  req->resp = "Failed to build module";
-	  req->code = CC_ERROR;
-	  req->waiting = 0;
-	  client->num_awaiting--;
-	}
-      else
-	req->waiting = 3;
-    }
-  
-  if (req->waiting == 3)
-    {
-      /* Doing commands.  */
-      enum update_status fail;
-      struct file *file = req->file;
-
-      // FIXME: Does this considered nadgering need to be propagated
-      // to all incomplete dependencies?
-      file->considered--; /* Force it to be considered.  */
-      req->waiting = 2;
-      fail = force_update_file (file);
-      req->waiting = 3;
-
-      /* Not ready yet.  */
-      if (!fail && file->command_state != cs_finished)
-	return;
-
-      if (req->file->update_status != us_success)
-	{
-	  req->resp = "Failed to build";
-	  req->code = CC_ERROR;
-	}
-      else
-	req->resp = bmi_name (req->file);
-      req->waiting = 0;
-      client->num_awaiting--;
-    }
+	if (!client->num_awaiting)
+	  {
+	    /* Unpause the job.  This could lead to short-term over commit,
+	       as we may have a still-running job borrowing the paused
+	       slot.  */
+	    DB (DB_JOBS, ("Unpausing job\n"));
+	    jobs_paused--;
+	    if (job_slots)
+	      job_slots--;
+	    waiting_clients--;
+	    client_write (client, slot);
+	  }
+      }
 }
 
-static void
-check_client_waiting (struct client_state *client, unsigned slot)
-{
-  unsigned ix;
-  for (ix = client->num_requests; ix--;)
-    if (client->requests[ix].waiting)
-      check_request_waiting (client, &client->requests[ix]);
-  if (!client->num_awaiting)
-    {
-      /* Unpause the job.  This could lead to short-term over commit,
-	 as we may have a still-running job borrowing the paused
-	 slot.  */
-      DB (DB_JOBS, ("Unpausing job\n"));
-      jobs_paused--;
-      if (job_slots)
-	job_slots--;
-      waiting_clients--;
-      client_write (client, slot);
-    }
-}
+/* Read data from a client.  Return non-zero if we blocked.  */
 
-/* Read data from a client.  */
-
-static void
+static int
 client_read (struct client_state *client, unsigned slot)
 {
   ssize_t bytes;
@@ -590,7 +551,7 @@ client_read (struct client_state *client, unsigned slot)
     {
       /* Error or EOF.  */
       delete_client (client, slot);
-      return;
+      return 0;
     }
 
   DB (DB_PLUGIN, ("module:%u read %u bytes '%.*s'\n",
@@ -628,20 +589,13 @@ client_read (struct client_state *client, unsigned slot)
     }
   client->buf_pos += bytes;
 
-  if (client->bol && client->buf_pos && (client->last || !client->corking))
-    client_process (client, slot);
-}
+  if (!client->bol || !client->buf_pos)
+    return 0;
 
-void
-mapper_check_waiting (void)
-{
-  unsigned slot;
-  if (!waiting_clients)
-    return;
+  if (client->corking && !client->last)
+    return 0;
 
-  for (slot = num_clients; slot--;)
-    if (clients[slot]->num_awaiting)
-      check_client_waiting (clients[slot], slot);
+  return client_process (client, slot);
 }
 
 /* Set bits in READERS for clients we're listening to.  */
@@ -674,6 +628,7 @@ mapper_pre_pselect (int hwm, fd_set *readers)
 int
 mapper_post_pselect (int r, fd_set *readers)
 {
+  int blocked = 0;
   unsigned ix;
 
   if (sock_fd >= 0 && FD_ISSET (sock_fd, readers))
@@ -682,14 +637,13 @@ mapper_post_pselect (int r, fd_set *readers)
       new_client ();
     }
 
-  /* Do backwards because reading can cause client deletion.  */
-  for (ix = num_clients; ix--;)
-    if (clients[ix]->reading && FD_ISSET(clients[ix]->fd, readers))
-      client_read (clients[ix], ix);
+  if (r)
+    /* Do backwards because reading can cause client deletion.  */
+    for (ix = num_clients; ix--;)
+      if (clients[ix]->reading && FD_ISSET(clients[ix]->fd, readers))
+	blocked |= client_read (clients[ix], ix);
 
-  mapper_check_waiting ();
-
-  return r;
+  return blocked;
 }
 
 pid_t
@@ -698,10 +652,14 @@ mapper_wait (int *status)
   static int recurse = 0;
   int r;
   sigset_t empty;
+  struct timespec spec;
+  struct timespec *specp = NULL;
+
+  spec.tv_sec = spec.tv_nsec = 0;
 
   if (recurse++)
     abort ();
-
+  
   sigemptyset (&empty);
   for (;;)
     {
@@ -710,7 +668,7 @@ mapper_wait (int *status)
 
       FD_ZERO (&readfds);
       hwm = mapper_pre_pselect (0, &readfds);
-      r = pselect (hwm + 1, &readfds, NULL, NULL, NULL, &empty);
+      r = pselect (hwm + 1, &readfds, NULL, NULL, specp, &empty);
       if (r < 0)
         switch (errno)
           {
@@ -730,8 +688,13 @@ mapper_wait (int *status)
           default:
             pfatal_with_name (_("pselect mapper"));
           }
-      else
-	r = mapper_post_pselect (r, &readfds);
+      else if (!r)
+	{
+	  recurse--;
+	  return 0;
+	}
+      else if (mapper_post_pselect (r, &readfds))
+	specp = &spec;
     }
 }
 

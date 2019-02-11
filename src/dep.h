@@ -130,5 +130,9 @@ struct goaldep *read_all_makefiles (const char **makefiles);
 void eval_buffer (char *buffer, const floc *floc);
 enum update_status update_goal_chain (struct goaldep *goals);
 
-enum update_status force_update_file (struct file *file);
-void force_remake_file (struct file *file);
+#if MAKE_CXX_MAPPER
+extern void add_mapper_goal (struct file *file);
+extern void mapper_file_finish (struct file *file);
+#else
+#define mapper_file_finish(F) ((void)(F))
+#endif

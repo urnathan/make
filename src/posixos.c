@@ -314,8 +314,8 @@ jobserver_acquire (int timeout)
         /* Timeout.  */
         return 0;
 
-      if (mapper)
-	r = mapper_post_pselect (r, &readfds);
+      if (mapper && mapper_post_pselect (r, &readfds))
+	spec.tv_sec = 0;
 
       if (r && FD_ISSET (job_fds[0], &readfds))
 	{
