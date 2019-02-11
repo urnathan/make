@@ -727,9 +727,7 @@ mapper_default_rules (void)
       {"%." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX, ""},
 
       /* Order Only! */
-      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cc | %.o", ""},
-      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cxx | %.o", ""},
-      {"$(C++.PREFIX)%." BMI_SUFFIX, "%.cpp | %.o", ""},
+      {"$(C++.PREFIX)%." BMI_SUFFIX, "| %.o", ""},
 
       {"$(C++.PREFIX)%." BMI_SUFFIX "u", "%", "$(COMPILE.cc)"
        " $(call " LEGACY_VAR ",\"$*\") $(OUTPUT_OPTION) $<"},
