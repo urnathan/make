@@ -241,30 +241,37 @@ client_token (struct client_state *client)
 /* Generate the BMI name from the dependency of file, removing the
    prefix.   */
 
-static const char *
-bmi_name (struct file *file)
+static void
+client_response (struct client_request *req, struct file *file)
 {
-  /* Not a rule-specific expansion.  */
-  char *repo = variable_expand ("$(.C++.PREFIX)");
-  const char *name = file->deps->file->name;
-  size_t len = strlen (repo);
+  if (!file || file->update_status == us_failed)
+    {
+      req->resp = "Failed to build module";
+      req->code = CC_ERROR;
+    }
+  else
+    {
+      /* Not a rule-specific expansion.  */
+      char *repo = variable_expand ("$(.C++.PREFIX)");
+      const char *name = file->deps->file->name;
+      size_t len = strlen (repo);
 
-  if (strlen (name) > len && !memcmp (repo, name, len))
-    name += len;
+      if (strlen (name) > len && !memcmp (repo, name, len))
+	name += len;
 
-  return name;
+      req->resp = name;
+    }
 }
 
 static int
 client_parse (struct client_state *client)
 {
   char *token;
-  struct client_request *resp = &client->requests[client->num_requests];
-  unsigned req = CC_ERROR;
+  struct client_request *req = &client->requests[client->num_requests];
 
-  resp->waiting = 0;
-  resp->file = NULL;
-  resp->resp = "Unknown request";
+  req->waiting = 0;
+  req->file = NULL;
+  req->resp = "Unknown request";
 
   DB (DB_PLUGIN, ("module:%u processing '%s'\n",
 		  client->cix, &client->buf[client->buf_pos]));
@@ -293,15 +300,15 @@ client_parse (struct client_state *client)
 
 	  (void)compiler;
 	  if (!job)
-	    resp->resp = "Cannot find matching job";
+	    req->resp = "Cannot find matching job";
 	  else
 	    {
 	      client->job = job;
-	      req = CC_HANDSHAKE;
+	      req->code = CC_HANDSHAKE;
 	    }
 	}
       else
-	resp->resp = "Expected handshake";
+	req->resp = "Expected handshake";
     }
   else
     {
@@ -314,15 +321,15 @@ client_parse (struct client_state *client)
 	  "DONE",    /* DONE $modulename  */
 	  NULL
 	};
+      unsigned code;
 
-      for (req = CC_IMPORT; req != CC_ERROR; req++)
-	if (!strcmp (token, words[req-CC_IMPORT]))
+      for (code = CC_IMPORT; code != CC_ERROR; code++)
+	if (!strcmp (token, words[code - CC_IMPORT]))
 	  {
 	    char *operand = client_token (client);
 	    if (!operand)
 	      {
-		req = CC_ERROR;
-		resp->resp = "Malformed request";
+		req->resp = "Malformed request";
 		break;
 	      }
 	    else
@@ -336,16 +343,16 @@ client_parse (struct client_state *client)
 		strcpy (target_name + len, "." MODULE_SUFFIX);
 
 		f = lookup_file (target_name);
-		if (req == CC_INCLUDE)
+		if (code == CC_INCLUDE)
 		  {
 		    // FIXME: think about remapping.
 		    if (f)
-		      req = CC_TRANSLATE;
-		    resp->resp = "";
+		      req->code = CC_TRANSLATE;
+		    req->resp = "";
 		    break;
 		  }
 
-		if (req == CC_DONE)
+		if (code == CC_DONE)
 		  {
 		    /* Ignore DONE for the moment.  */
 		    break;
@@ -362,7 +369,7 @@ client_parse (struct client_state *client)
 		f->is_target = 1;
 		if (!f->deps)
 		  try_implicit_rule (f, 0);
-		if (req == CC_IMPORT)
+		if (code == CC_IMPORT)
 		  {
 		    // FIXME: loop detection
 		  }
@@ -370,25 +377,14 @@ client_parse (struct client_state *client)
 
 		/* There should be exactly one dependency.  */
 		if (!f->deps)
-		  {
-		    resp->resp = "Unknown module name";
-		    req = CC_ERROR;
-		  }
+		  req->resp = "Unknown module name";
 		else if (f->deps->next)
-		  {
-		    resp->resp = "Ambiguous module name";
-		    req = CC_ERROR;
-		  }
-		else if (req == CC_EXPORT
+		  req->resp = "Ambiguous module name";
+		else if (code == CC_EXPORT
 			 || f->command_state == cs_finished)
 		  {
-		    if (f->update_status == us_failed)
-		      {
-			resp->resp = "Failed to build module";
-			req = CC_ERROR;
-		      }
-		    else
-		      resp->resp = bmi_name (f);
+		    req->code = code;
+		    client_response (req, f);
 		  }
 		else
 		  {
@@ -398,8 +394,9 @@ client_parse (struct client_state *client)
 			add_mapper_goal (f);
 			// FIXME: add .o dep to OBJS?
 		      }
-		    resp->file = f;
-		    resp->waiting = 1;
+		    req->code = code;
+		    req->file = f;
+		    req->waiting = 1;
 		    client->num_awaiting++;
 		  }
 		break;
@@ -407,7 +404,6 @@ client_parse (struct client_state *client)
 	  }
     }
 
-  resp->code = req;
   client->num_requests++;
 
   while (client->buf[client->buf_pos])
@@ -532,13 +528,7 @@ mapper_file_finish (struct file *f)
 
 	    if (req->waiting && (!f || req->file == f))
 	      {
-		if (!f || f->update_status == us_failed)
-		  {
-		    req->resp = "Failed to build module";
-		    req->code = CC_ERROR;
-		  }
-		else
-		  req->resp = bmi_name (f);
+		client_response (req, f);
 		req->waiting = 0;
 		client->num_awaiting--;
 	      }
