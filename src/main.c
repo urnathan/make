@@ -3472,6 +3472,9 @@ die (int status)
       if (print_version_flag)
         print_version ();
 
+      /* We're boned.  */
+      mapper_file_finish (NULL);
+
       /* Wait for children to die.  */
       err = (status != 0);
       while (job_slots_used > 0)

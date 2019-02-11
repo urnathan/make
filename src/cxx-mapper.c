@@ -381,14 +381,22 @@ client_parse (struct client_state *client)
 		  }
 		else if (req == CC_EXPORT
 			 || f->command_state == cs_finished)
-		  // FIXME: note of build failing?
-		  resp->resp = bmi_name (f);
+		  {
+		    if (f->update_status == us_failed)
+		      {
+			resp->resp = "Failed to build module";
+			req = CC_ERROR;
+		      }
+		    else
+		      resp->resp = bmi_name (f);
+		  }
 		else
 		  {
 		    if (!f->mapper_target)
 		      {
 			f->deps->file->precious = 1;
 			add_mapper_goal (f);
+			// FIXME: add .o dep to OBJS?
 		      }
 		    resp->file = f;
 		    resp->waiting = 1;
@@ -522,11 +530,16 @@ mapper_file_finish (struct file *f)
 	  {
 	    struct client_request *req = &client->requests[ix];
 
-	    if (req->waiting && req->file == f)
+	    if (req->waiting && (!f || req->file == f))
 	      {
-		// FIXME: failure code?
+		if (!f || f->update_status == us_failed)
+		  {
+		    req->resp = "Failed to build module";
+		    req->code = CC_ERROR;
+		  }
+		else
+		  req->resp = bmi_name (f);
 		req->waiting = 0;
-		req->resp = bmi_name (req->file);
 		client->num_awaiting--;
 	      }
 	  }
