@@ -62,7 +62,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
   C++.PREFIX := {repodir/pfx}
 
   # module name-> bmi name mapping
-  # C++.{modulename} : {bminame} ; @#nop
+  # C++.{modulename} : {bminame} ;
   %.c++m : $(C++.PREFIX)%.gcm ;
   "%".c++m : $(C++.PREFIX)%.gcmu ;
   <%>.c++m : $(C++.PREFIX)%.gcms ;
@@ -71,7 +71,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
   # {bminame} : {sources} | objectname
   # {bminame} : {sources} ; CCrule
   
-  $(C++.PREFIX)%.gcm : %.cc | %.o ;
+  $(C++.PREFIX)%.gcm : | %.o ;
   $(C++.PREFIX)%.gcmu : % ; $(COMPILE.cc) -fmodule-legacy='"$*"' $<
   $(C++.PREFIX)%.gcms : % ; $(COMPILE.cc) -fmodule-legacy='<$*>' $<
  */
@@ -92,14 +92,18 @@ enum response_codes
   CC_DONE,
   CC_ERROR,
   CC_TRANSLATE,
+  CC_IMPORTING,
 };
 
 struct client_request
 {
   enum response_codes code : 8;
-  unsigned waiting : 8;
-  const char *resp;
-  struct file *file;
+  unsigned waiting : 1;
+  union 
+  {
+    const char *resp;
+    struct file *file;
+  } u;
 };
 
 struct client_state 
@@ -246,7 +250,7 @@ client_response (struct client_request *req, struct file *file)
 {
   if (!file || file->update_status == us_failed)
     {
-      req->resp = "Failed to build module";
+      req->u.resp = "Failed to build module";
       req->code = CC_ERROR;
     }
   else
@@ -259,7 +263,7 @@ client_response (struct client_request *req, struct file *file)
       if (strlen (name) > len && !memcmp (repo, name, len))
 	name += len;
 
-      req->resp = name;
+      req->u.resp = name;
     }
 }
 
@@ -269,9 +273,8 @@ client_parse (struct client_state *client)
   char *token;
   struct client_request *req = &client->requests[client->num_requests];
 
-  req->waiting = 0;
-  req->file = NULL;
-  req->resp = "Unknown request";
+  req->code = CC_ERROR;
+  req->u.resp = "Unknown request";
 
   DB (DB_PLUGIN, ("module:%u processing '%s'\n",
 		  client->cix, &client->buf[client->buf_pos]));
@@ -300,7 +303,7 @@ client_parse (struct client_state *client)
 
 	  (void)compiler;
 	  if (!job)
-	    req->resp = "Cannot find matching job";
+	    req->u.resp = "Cannot find matching job";
 	  else
 	    {
 	      client->job = job;
@@ -308,7 +311,7 @@ client_parse (struct client_state *client)
 	    }
 	}
       else
-	req->resp = "Expected handshake";
+	req->u.resp = "Expected handshake";
     }
   else
     {
@@ -329,7 +332,7 @@ client_parse (struct client_state *client)
 	    char *operand = client_token (client);
 	    if (!operand)
 	      {
-		req->resp = "Malformed request";
+		req->u.resp = "Malformed request";
 		break;
 	      }
 	    else
@@ -346,15 +349,15 @@ client_parse (struct client_state *client)
 		if (code == CC_INCLUDE)
 		  {
 		    // FIXME: think about remapping.
-		    if (f)
-		      req->code = CC_TRANSLATE;
-		    req->resp = "";
+		    req->code = f ? CC_TRANSLATE : CC_INCLUDE;
+		    req->u.resp = "";
 		    break;
 		  }
 
 		if (code == CC_DONE)
 		  {
 		    /* Ignore DONE for the moment.  */
+		    req->code = code;
 		    break;
 		  }
 
@@ -369,22 +372,18 @@ client_parse (struct client_state *client)
 		f->is_target = 1;
 		if (!f->deps)
 		  try_implicit_rule (f, 0);
-		if (code == CC_IMPORT)
-		  {
-		    // FIXME: loop detection
-		  }
 		free (target_name);
 
 		/* There should be exactly one dependency.  */
 		if (!f->deps)
-		  req->resp = "Unknown module name";
+		  req->u.resp = "Unknown module name";
 		else if (f->deps->next)
-		  req->resp = "Ambiguous module name";
+		  req->u.resp = "Ambiguous module name";
 		else if (code == CC_EXPORT
 			 || f->command_state == cs_finished)
 		  {
-		    req->code = code;
 		    client_response (req, f);
+		    req->code = code;
 		  }
 		else
 		  {
@@ -394,9 +393,13 @@ client_parse (struct client_state *client)
 			add_mapper_goal (f);
 			// FIXME: add .o dep to OBJS?
 		      }
-		    req->code = code;
-		    req->file = f;
-		    req->waiting = 1;
+		    else
+		      {
+			// FIXME: loop detection
+		      }
+
+		    req->code = CC_IMPORTING;
+		    req->u.file = f;
 		    client->num_awaiting++;
 		  }
 		break;
@@ -435,23 +438,24 @@ client_write (struct client_state *client, unsigned slot)
 	  break;
 
 	case CC_ERROR:
-	  client_print (client, "ERROR %s", req->resp);
+	  client_print (client, "ERROR %s", req->u.resp);
 	  break;
 
 	case CC_INCLUDE:
-	  client_print (client, "INCLUDE %s", req->resp);
+	  client_print (client, "INCLUDE %s", req->u.resp);
 	  break;
 
 	case CC_TRANSLATE:
-	  client_print (client, "IMPORT %s", req->resp);
+	  client_print (client, "IMPORT %s", req->u.resp);
 	  break;
 	  
 	case CC_IMPORT:
 	case CC_EXPORT:
-	  client_print (client, "OK %s", req->resp);
+	  client_print (client, "OK %s", req->u.resp);
 	  break;
 
 	case CC_DONE:;
+	case CC_IMPORTING:;
 	}
     }
 
@@ -526,10 +530,10 @@ mapper_file_finish (struct file *f)
 	  {
 	    struct client_request *req = &client->requests[ix];
 
-	    if (req->waiting && (!f || req->file == f))
+	    if (req->code == CC_IMPORTING && (!f || req->u.file == f))
 	      {
 		client_response (req, f);
-		req->waiting = 0;
+		req->code = CC_IMPORT;
 		client->num_awaiting--;
 	      }
 	  }
