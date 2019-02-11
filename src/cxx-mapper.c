@@ -78,6 +78,9 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #define MAPPER_VERSION 0
 
+#define LEGACY_VAR "CXX_MODULE_LEGACY"
+#define MAPPER_VAR "CXX_MODULE_MAPPER"
+
 enum response_codes
 {
   CC_HANDSHAKE,
@@ -349,11 +352,17 @@ client_parse (struct client_state *client)
 		if (!f)
 		  {
 		    f = enter_file (strcache_add (target_name));
-		    f->phony = 1;
-		    f->is_target = 1;
 		    f->last_mtime = NONEXISTENT_MTIME;
 		    f->mtime_before_update = NONEXISTENT_MTIME;
-		    try_implicit_rule (f, 0);
+		  }
+
+		f->phony = 1;
+		f->is_target = 1;
+		if (!f->deps)
+		  try_implicit_rule (f, 0);
+		if (req == CC_IMPORT)
+		  {
+		    // FIXME: loop detection
 		  }
 		free (target_name);
 
@@ -375,7 +384,10 @@ client_parse (struct client_state *client)
 		else
 		  {
 		    if (!f->mapper_target)
-		      add_mapper_goal (f);
+		      {
+			f->deps->file->precious = 1;
+			add_mapper_goal (f);
+		      }
 		    resp->file = f;
 		    resp->waiting = 1;
 		    client->num_awaiting++;
@@ -649,7 +661,6 @@ mapper_post_pselect (int r, fd_set *readers)
 pid_t
 mapper_wait (int *status)
 {
-  static int recurse = 0;
   int r;
   sigset_t empty;
   struct timespec spec;
@@ -657,9 +668,6 @@ mapper_wait (int *status)
 
   spec.tv_sec = spec.tv_nsec = 0;
 
-  if (recurse++)
-    abort ();
-  
   sigemptyset (&empty);
   for (;;)
     {
@@ -678,10 +686,7 @@ mapper_wait (int *status)
 		 so no need to EINTRLOOP here.  */
 	      pid_t pid = waitpid ((pid_t)-1, status, WNOHANG);
 	      if (pid > 0)
-		{
-		  recurse--;
-		  return pid;
-		}
+		return pid;
 	    }
 	    break;
 
@@ -689,10 +694,7 @@ mapper_wait (int *status)
             pfatal_with_name (_("pselect mapper"));
           }
       else if (!r)
-	{
-	  recurse--;
-	  return 0;
-	}
+	return 0; /* Timed out, but have new suspended job.  */
       else if (mapper_post_pselect (r, &readfds))
 	specp = &spec;
     }
@@ -705,25 +707,34 @@ mapper_default_rules (void)
 {
   static struct pspec rules[] =
     {
-      {"C++.%", "$(C++.PREFIX)%.gcm", ""},
       {"C++.\"%\"", "$(C++.PREFIX)%.gcmu", ""},
       {"C++.<%>", "$(C++.PREFIX)%.gcms", ""},
+      {"C++.%", "$(C++.PREFIX)%.gcm", ""},
 
-      // FIXME: Add other C++ suffixes
+      /* Order Only! */
       {"$(C++.PREFIX)%.gcm", "%.cc | %.o", ""},
-      // FIXME: Wrap -fmodule-legacy into a variable/fn
-      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc) -fmodule-legacy='\"$*\"' $(OUTPUT_OPTION) $<"},
-      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc) -fmodule-legacy='<$*>' $(OUTPUT_OPTION) $<"},
+      {"$(C++.PREFIX)%.gcm", "%.cxx | %.o", ""},
+      {"$(C++.PREFIX)%.gcm", "%.cpp | %.o", ""},
+
+      {"$(C++.PREFIX)%.gcmu", "%", "$(COMPILE.cc)"
+       " $(call " LEGACY_VAR ",\"$*\") $(OUTPUT_OPTION) $<"},
+      {"$(C++.PREFIX)%.gcms", "%", "$(COMPILE.cc)"
+       " $(call " LEGACY_VAR ",<$*>) $(OUTPUT_OPTION) $<"},
 	
       {0, 0, 0}
     };
-  
   struct pspec *p;
+
+  define_variable_global (LEGACY_VAR, strlen (LEGACY_VAR),
+			  "-fmodule-legacy='$1'", o_default, 1, NILF);
 
   for (p = rules; p->target; p++)
     {
+      /* We must expand the C++.PREFIX now.  */
       if (p->target[0] == '$')
 	p->target = xstrdup (variable_expand (p->target));
+      if (p->dep[0] == '$')
+	p->dep = xstrdup (variable_expand (p->dep));
       install_pattern_rule (p, 0);
     }
 }
@@ -757,7 +768,7 @@ mapper_setup (const char *option)
 
   if (!option || !option[0])
     {
-      char *var = variable_expand ("$(CXX_MODULE_MAPPER)");
+      char *var = variable_expand ("$("MAPPER_VAR")");
       if (!var[0] && !option)
 	return 0;
       option = var;
@@ -828,11 +839,8 @@ mapper_setup (const char *option)
     }
 
   if (sock_name && !errmsg)
-    {
-      /* Force it to be undefined now, and we'll define it per-job.  */
-      const char *name = "CXX_MODULE_MAPPER";
-      undefine_variable_global (name, strlen (name), o_automatic);
-    }
+    /* Force it to be undefined now, and we'll define it per-job.  */
+    undefine_variable_global (MAPPER_VAR, strlen (MAPPER_VAR), o_automatic);
   else
     {
       const char *arg;
@@ -860,7 +868,7 @@ mapper_ident (void *cookie)
   if (!sock_name)
     return 0;
   assn = xmalloc (100);
-  sprintf (assn, "CXX_MODULE_MAPPER=%s?%#lx", sock_name, (unsigned long)cookie);
+  sprintf (assn, MAPPER_VAR "=%s?%#lx", sock_name, (unsigned long)cookie);
   return assn;
 }
 

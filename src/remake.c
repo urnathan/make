@@ -57,6 +57,7 @@ unsigned int commands_started = 0;
 static struct goaldep *goal_list;
 static struct dep *goal_dep;
 
+/* New dependencies from mapper.  */
 static struct dep *new_deps;
 
 /* Current value for pruning the scan of the goal chain.
@@ -101,7 +102,7 @@ update_goal_chain (struct goaldep *goaldeps)
 
   /* Update all the goals until they are all finished.  */
 
-  while (goals != 0 || new_deps)
+  while (goals != 0)
     {
       struct dep *g, *lastgoal;
 
@@ -109,19 +110,8 @@ update_goal_chain (struct goaldep *goaldeps)
 
       start_waiting_jobs ();
 
-      if (new_deps)
-	{
-	  for (g = new_deps; g; g = lastgoal)
-	    {
-	      lastgoal = g->next;
-	      g->next = goals;
-	      goals = g;
-	    }
-	  new_deps = NULL;
-	}
-      else
-	/* Wait for a child to die.  */
-	reap_children (1, 0);
+      /* Wait for a child to die.  */
+      reap_children (1, 0);
 
       lastgoal = 0;
       g = goals;
@@ -222,6 +212,19 @@ update_goal_chain (struct goaldep *goaldeps)
           /* Reset FILE since it is null at the end of the loop.  */
           file = g->file;
 
+	  if (new_deps)
+	    {
+	      /* We got some new deps.  Add them into the list.  */
+	      struct dep *next, *probe;
+	      for (probe = new_deps; probe; probe = next)
+		{
+		  next = probe->next;
+		  probe->next = g->next;
+		  g->next = probe;
+		}
+	      new_deps = NULL;
+	    }
+
           if (stop || !any_not_updated)
             {
               /* If we have found nothing whatever to do for the goal,
@@ -232,6 +235,7 @@ update_goal_chain (struct goaldep *goaldeps)
                      or not at all.  G->changed will have been set above if
                      any commands were actually started for this goal.  */
                   && file->update_status == us_success && !g->changed
+		  && !file->mapper_target
                   /* Never give a message under -s or -q.  */
                   && !silent_flag && !question_flag)
                 OS (message, 1, ((file->phony || file->cmds == 0)
@@ -263,9 +267,7 @@ update_goal_chain (struct goaldep *goaldeps)
       /* If we reached the end of the dependency graph update CONSIDERED
          for the next pass.  */
       if (g == 0)
-	{
-	  ++considered;
-	}
+	++considered;
     }
 
   if (rebuilding_makefiles)

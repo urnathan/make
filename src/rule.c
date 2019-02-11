@@ -359,7 +359,6 @@ void
 install_pattern_rule (struct pspec *p, int terminal)
 {
   struct rule *r;
-  const char *ptr;
 
   r = xmalloc (sizeof (struct rule));
 
@@ -374,8 +373,7 @@ install_pattern_rule (struct pspec *p, int terminal)
   assert (r->suffixes[0] != NULL);
   ++r->suffixes[0];
 
-  ptr = p->dep;
-  r->deps = PARSE_SIMPLE_SEQ ((char **)&ptr, struct dep);
+  r->deps = split_prereqs ((char *)p->dep);
 
   if (new_pattern_rule (r, 0))
     {
