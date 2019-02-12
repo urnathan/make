@@ -246,9 +246,14 @@ client_token (struct client_state *client)
    prefix.   */
 
 static void
-client_response (struct client_request *req, struct file *file)
+client_response (struct client_request *req, struct file *file, const char *why)
 {
-  if (!file || file->update_status == us_failed)
+  if (!file)
+    {
+      req->u.resp = why;
+      req->code = CC_ERROR;
+    }
+  else if (file->update_status == us_failed)
     {
       req->u.resp = "Failed to build module";
       req->code = CC_ERROR;
@@ -382,7 +387,7 @@ client_parse (struct client_state *client)
 		else if (code == CC_EXPORT
 			 || f->command_state == cs_finished)
 		  {
-		    client_response (req, f);
+		    client_response (req, f, NULL);
 		    req->code = code;
 		  }
 		else
@@ -392,10 +397,6 @@ client_parse (struct client_state *client)
 			f->deps->file->precious = 1;
 			add_mapper_goal (f);
 			// FIXME: add .o dep to OBJS?
-		      }
-		    else
-		      {
-			// FIXME: loop detection
 		      }
 
 		    req->code = CC_IMPORTING;
@@ -516,8 +517,8 @@ client_process (struct client_state *client, unsigned slot)
   return client->num_awaiting != 0;
 }
 
-void
-mapper_file_finish (struct file *f)
+static void
+do_mapper_file_finish (struct file *f, const char *why)
 {
   unsigned slot, ix;
 
@@ -532,7 +533,7 @@ mapper_file_finish (struct file *f)
 
 	    if (req->code == CC_IMPORTING && (!f || req->u.file == f))
 	      {
-		client_response (req, f);
+		client_response (req, f, why);
 		req->code = CC_IMPORT;
 		client->num_awaiting--;
 	      }
@@ -551,6 +552,12 @@ mapper_file_finish (struct file *f)
 	    client_write (client, slot);
 	  }
       }
+}
+
+void
+mapper_file_finish (struct file *file)
+{
+  do_mapper_file_finish (file, "Make terminated");
 }
 
 /* Read data from a client.  Return non-zero if we blocked.  */
@@ -683,6 +690,11 @@ mapper_wait (int *status)
       fd_set readfds;
       int hwm = 0;
 
+      if (!specp && waiting_clients == num_clients
+	  && num_clients == (job_slots ? job_slots_used : jobserver_tokens))
+	/* Deadlocked.  */
+	do_mapper_file_finish (NULL, "Circular module dependency");
+
       FD_ZERO (&readfds);
       hwm = mapper_pre_pselect (0, &readfds);
       r = pselect (hwm + 1, &readfds, NULL, NULL, specp, &empty);
@@ -723,10 +735,10 @@ mapper_default_rules (void)
       /* Order Only! */
       {"$(C++.PREFIX)%." BMI_SUFFIX, "| %.o", ""},
 
-      {"$(C++.PREFIX)%." BMI_SUFFIX "u", "%", "$(COMPILE.cc)"
-       " $(call " LEGACY_VAR ",\"$*\") $(OUTPUT_OPTION) $<"},
-      {"$(C++.PREFIX)%." BMI_SUFFIX "s", "%", "$(COMPILE.cc)"
-       " $(call " LEGACY_VAR ",<$*>) $(OUTPUT_OPTION) $<"},
+      {"$(C++.PREFIX)%." BMI_SUFFIX "u", "%",
+       "$(COMPILE.cc) $(call " LEGACY_VAR ",\"$*\") $<"},
+      {"$(C++.PREFIX)%." BMI_SUFFIX "s", "%",
+       "$(COMPILE.cc) $(call " LEGACY_VAR ",<$*>) $<"},
 	
       {0, 0, 0}
     };

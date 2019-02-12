@@ -290,6 +290,7 @@ add_mapper_goal (struct file *file)
   goal->file = file;
   goal->next = new_deps;
   new_deps = goal;
+  
 }
 #endif
 
