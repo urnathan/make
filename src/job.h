@@ -48,7 +48,6 @@ struct child
     unsigned int  deleted:1;    /* Nonzero if targets have been deleted.  */
     unsigned int  recursive:1;  /* Nonzero for recursive command ('+' etc.)  */
     unsigned int  dontcare:1;   /* Saved dontcare flag.  */
-    unsigned int  blocked:1;	/* Blocked pending a module dependency.  */
   };
 
 extern struct child *children;

@@ -98,7 +98,6 @@ enum response_codes
 struct client_request
 {
   enum response_codes code : 8;
-  unsigned waiting : 1;
   union 
   {
     const char *resp;
@@ -169,7 +168,7 @@ new_client (void)
       clients = xrealloc (clients, alloc_clients * sizeof (*clients));
     }
 
-  DB (DB_PLUGIN, ("module:%u connected\n", client->cix));
+  DB (DB_PLUGIN, ("mapper:%u connected\n", client->cix));
 
   clients[num_clients++] = client;
 }
@@ -177,7 +176,7 @@ new_client (void)
 static void
 delete_client (struct client_state *client, unsigned slot)
 {
-  DB (DB_PLUGIN, ("module:%u destroyed\n", client->cix));
+  DB (DB_PLUGIN, ("mapper:%u destroyed\n", client->cix));
   close (client->fd);
   free (client->buf);
   free (client->requests);
@@ -212,7 +211,7 @@ client_print (struct client_state *client, const char *fmt, ...)
       if (actual < space)
 	break;
     }
-  DB (DB_PLUGIN, ("module:%u sending '%.*s'\n",
+  DB (DB_PLUGIN, ("mapper:%u sending '%.*s'\n",
 		  client->cix, (int)(actual + client->corking),
 		  &client->buf[client->buf_pos - client->corking]));
   client->buf_pos += actual;
@@ -272,6 +271,122 @@ client_response (struct client_request *req, struct file *file, const char *why)
     }
 }
 
+static void
+client_write (struct client_state *client, unsigned slot)
+{
+  unsigned ix;
+
+  client->buf_pos = 0;
+  client->corking = client->num_requests > 1;
+
+  for (ix = 0; ix != client->num_requests; ix++)
+    {
+      struct client_request *req = &client->requests[ix];
+
+      switch (req->code)
+	{
+	case CC_HANDSHAKE:
+	  {
+	    char *repo = variable_expand ("$(.C++.PREFIX)");
+	    client_print (client, "HELLO %u GNUMake %s", MAPPER_VERSION, repo);
+	  }
+	  break;
+
+	case CC_ERROR:
+	  client_print (client, "ERROR %s", req->u.resp);
+	  break;
+
+	case CC_INCLUDE:
+	  client_print (client, "INCLUDE %s", req->u.resp);
+	  break;
+
+	case CC_TRANSLATE:
+	  client_print (client, "IMPORT %s", req->u.resp);
+	  break;
+	  
+	case CC_IMPORT:
+	case CC_EXPORT:
+	  client_print (client, "OK %s", req->u.resp);
+	  break;
+
+	case CC_DONE:;
+	case CC_IMPORTING:;
+	}
+    }
+
+  free (client->requests);
+  client->requests = NULL;
+  client->num_requests = client->num_awaiting = 0;
+
+  if (client->buf_pos)
+    {
+      ssize_t bytes;
+
+      if (client->corking)
+	{
+	  client->buf[client->buf_pos++] = '\n';
+	  DB (DB_PLUGIN, ("mapper:%u sending ''\n", client->cix));
+	}
+      EINTRLOOP (bytes, write (client->fd, client->buf, client->buf_pos));
+      if (bytes < 0 || (size_t)bytes != client->buf_pos)
+	{
+	  delete_client (client, slot);
+	  return;
+	}
+    }
+
+  /* Set up for more reading.  */
+  client->buf_pos = 0;
+  client->bol = 1;
+  client->corking = 0;
+  client->last = 0;
+  client->reading = 1;
+}
+
+static void
+do_mapper_file_finish (struct file *f, const char *why)
+{
+  unsigned slot, ix;
+
+  /* Do backwards because completion could delete a client.  */
+  for (slot = num_clients; slot--;)
+    if (clients[slot]->num_awaiting)
+      {
+	struct client_state *client = clients[slot];
+	for (ix = client->num_requests; ix--;)
+	  {
+	    struct client_request *req = &client->requests[ix];
+
+	    if (req->code == CC_IMPORTING && (!f || req->u.file == f))
+	      {
+		client_response (req, f, why);
+		req->code = CC_IMPORT;
+		client->num_awaiting--;
+	      }
+	  }
+
+	if (!client->num_awaiting)
+	  {
+	    /* Unpause the job.  This could lead to short-term over commit,
+	       as we may have a still-running job borrowing the paused
+	       slot.  */
+	    DB (DB_JOBS, ("mapper:%u unpausing job %s\n", client->cix,
+			  client->job->file->name));
+	    jobs_paused--;
+	    if (job_slots)
+	      job_slots--;
+	    waiting_clients--;
+	    client_write (client, slot);
+	  }
+      }
+}
+
+void
+mapper_file_finish (struct file *file)
+{
+  do_mapper_file_finish (file, "Make terminated");
+}
+
 static int
 client_parse (struct client_state *client)
 {
@@ -281,7 +396,7 @@ client_parse (struct client_state *client)
   req->code = CC_ERROR;
   req->u.resp = "Unknown request";
 
-  DB (DB_PLUGIN, ("module:%u processing '%s'\n",
+  DB (DB_PLUGIN, ("mapper:%u processing '%s'\n",
 		  client->cix, &client->buf[client->buf_pos]));
   if (client->buf[client->buf_pos] == '+'
       || client->buf[client->buf_pos] == '-')
@@ -359,13 +474,6 @@ client_parse (struct client_state *client)
 		    break;
 		  }
 
-		if (code == CC_DONE)
-		  {
-		    /* Ignore DONE for the moment.  */
-		    req->code = code;
-		    break;
-		  }
-
 		if (!f)
 		  {
 		    f = enter_file (strcache_add (target_name));
@@ -384,6 +492,12 @@ client_parse (struct client_state *client)
 		  req->u.resp = "Unknown module name";
 		else if (f->deps->next)
 		  req->u.resp = "Ambiguous module name";
+		else if (code == CC_DONE)
+		  {
+		    /* Inform any waiters, they may continue.  */
+		    mapper_file_finish (f);
+		    req->code = code;
+		  }
 		else if (code == CC_EXPORT
 			 || f->command_state == cs_finished)
 		  {
@@ -417,75 +531,6 @@ client_parse (struct client_state *client)
   return 1;
 }
 
-static void
-client_write (struct client_state *client, unsigned slot)
-{
-  unsigned ix;
-
-  client->buf_pos = 0;
-  client->corking = client->num_requests > 1;
-
-  for (ix = 0; ix != client->num_requests; ix++)
-    {
-      struct client_request *req = &client->requests[ix];
-
-      switch (req->code)
-	{
-	case CC_HANDSHAKE:
-	  {
-	    char *repo = variable_expand ("$(.C++.PREFIX)");
-	    client_print (client, "HELLO %u GNUMake %s", MAPPER_VERSION, repo);
-	  }
-	  break;
-
-	case CC_ERROR:
-	  client_print (client, "ERROR %s", req->u.resp);
-	  break;
-
-	case CC_INCLUDE:
-	  client_print (client, "INCLUDE %s", req->u.resp);
-	  break;
-
-	case CC_TRANSLATE:
-	  client_print (client, "IMPORT %s", req->u.resp);
-	  break;
-	  
-	case CC_IMPORT:
-	case CC_EXPORT:
-	  client_print (client, "OK %s", req->u.resp);
-	  break;
-
-	case CC_DONE:;
-	case CC_IMPORTING:;
-	}
-    }
-
-  free (client->requests);
-  client->requests = NULL;
-  client->num_requests = client->num_awaiting = 0;
-
-  if (client->buf_pos)
-    {
-      ssize_t bytes;
-
-      if (client->corking)
-	client->buf[client->buf_pos++] = '\n';
-      EINTRLOOP (bytes, write (client->fd, client->buf, client->buf_pos));
-      if (bytes < 0 || (size_t)bytes != client->buf_pos)
-	{
-	  delete_client (client, slot);
-	  return;
-	}
-    }
-
-  /* Set up for more reading.  */
-  client->buf_pos = 0;
-  client->bol = 1;
-  client->corking = 0;
-  client->last = 0;
-  client->reading = 1;
-}
-
 static int
 client_process (struct client_state *client, unsigned slot)
 {
@@ -505,7 +550,8 @@ client_process (struct client_state *client, unsigned slot)
       /* Even though the thing we're waiting on might have already
          started, it is still correct to note that we're paused, so
          that something else can run while we wait.  */
-      DB (DB_JOBS, ("Pausing job\n"));
+      DB (DB_JOBS, ("mapper:%u pausing job %s\n", client->cix,
+		    client->job->file->name));
       jobs_paused++;
       if (job_slots)
 	job_slots++;
@@ -515,49 +561,6 @@ client_process (struct client_state *client, unsigned slot)
     client_write (client, slot);
 
   return client->num_awaiting != 0;
-}
-
-static void
-do_mapper_file_finish (struct file *f, const char *why)
-{
-  unsigned slot, ix;
-
-  /* Do backwards because completion could delete a client.  */
-  for (slot = num_clients; slot--;)
-    if (clients[slot]->num_awaiting)
-      {
-	struct client_state *client = clients[slot];
-	for (ix = client->num_requests; ix--;)
-	  {
-	    struct client_request *req = &client->requests[ix];
-
-	    if (req->code == CC_IMPORTING && (!f || req->u.file == f))
-	      {
-		client_response (req, f, why);
-		req->code = CC_IMPORT;
-		client->num_awaiting--;
-	      }
-	  }
-
-	if (!client->num_awaiting)
-	  {
-	    /* Unpause the job.  This could lead to short-term over commit,
-	       as we may have a still-running job borrowing the paused
-	       slot.  */
-	    DB (DB_JOBS, ("Unpausing job\n"));
-	    jobs_paused--;
-	    if (job_slots)
-	      job_slots--;
-	    waiting_clients--;
-	    client_write (client, slot);
-	  }
-      }
-}
-
-void
-mapper_file_finish (struct file *file)
-{
-  do_mapper_file_finish (file, "Make terminated");
 }
 
 /* Read data from a client.  Return non-zero if we blocked.  */
@@ -582,7 +585,7 @@ client_read (struct client_state *client, unsigned slot)
       return 0;
     }
 
-  DB (DB_PLUGIN, ("module:%u read %u bytes '%.*s'\n",
+  DB (DB_PLUGIN, ("mapper:%u read %u bytes '%.*s'\n",
 		  client->cix, (unsigned) bytes,
 		  (int) bytes, client->buf + client->buf_pos));
 
@@ -691,7 +694,7 @@ mapper_wait (int *status)
       int hwm = 0;
 
       if (!specp && waiting_clients == num_clients
-	  && num_clients == (job_slots ? job_slots_used : jobserver_tokens))
+	  && jobs_paused == (job_slots ? job_slots_used : jobserver_tokens))
 	/* Deadlocked.  */
 	do_mapper_file_finish (NULL, "Circular module dependency");
 
