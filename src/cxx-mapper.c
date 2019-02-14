@@ -80,6 +80,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #define LEGACY_VAR "CXX_MODULE_LEGACY"
 #define MAPPER_VAR "CXX_MODULE_MAPPER"
+#define PREFIX_VAR "CXX_MODULE_PREFIX"
 #define MODULE_SUFFIX "c++m"
 #define BMI_SUFFIX "gcm"
 
@@ -260,7 +261,7 @@ client_response (struct client_request *req, struct file *file, const char *why)
   else
     {
       /* Not a rule-specific expansion.  */
-      char *repo = variable_expand ("$(.C++.PREFIX)");
+      char *repo = variable_expand ("$(" PREFIX_VAR ")");
       const char *name = file->deps->file->name;
       size_t len = strlen (repo);
 
@@ -287,7 +288,7 @@ client_write (struct client_state *client, unsigned slot)
 	{
 	case CC_HANDSHAKE:
 	  {
-	    char *repo = variable_expand ("$(.C++.PREFIX)");
+	    char *repo = variable_expand ("$(" PREFIX_VAR ")");
 	    client_print (client, "HELLO %u GNUMake %s", MAPPER_VERSION, repo);
 	  }
 	  break;
@@ -731,16 +732,16 @@ mapper_default_rules (void)
 {
   static struct pspec rules[] =
     {
-      {"\"%\"." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX "u", ""},
-      {"<%>." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX "s", ""},
-      {"%." MODULE_SUFFIX, "$(C++.PREFIX)%." BMI_SUFFIX, ""},
+      {"\"%\"." MODULE_SUFFIX, "$(" PREFIX_VAR ")%." BMI_SUFFIX "u", ""},
+      {"<%>." MODULE_SUFFIX, "$(" PREFIX_VAR ")%." BMI_SUFFIX "s", ""},
+      {"%." MODULE_SUFFIX, "$(" PREFIX_VAR ")%." BMI_SUFFIX, ""},
 
       /* Order Only! */
-      {"$(C++.PREFIX)%." BMI_SUFFIX, "| %.o", ""},
+      {"$(" PREFIX_VAR ")%." BMI_SUFFIX, "| %.o", ""},
 
-      {"$(C++.PREFIX)%." BMI_SUFFIX "u", "%",
+      {"$(" PREFIX_VAR ")%." BMI_SUFFIX "u", "%",
        "$(COMPILE.cc) $(call " LEGACY_VAR ",\"$*\") $<"},
-      {"$(C++.PREFIX)%." BMI_SUFFIX "s", "%",
+      {"$(" PREFIX_VAR ")%." BMI_SUFFIX "s", "%",
        "$(COMPILE.cc) $(call " LEGACY_VAR ",<$*>) $<"},
 	
       {0, 0, 0}
@@ -752,7 +753,7 @@ mapper_default_rules (void)
 
   for (p = rules; p->target; p++)
     {
-      /* We must expand the C++.PREFIX now.  */
+      /* We must expand the PREFIX_VAR now.  */
       if (p->target[0] == '$')
 	p->target = xstrdup (variable_expand (p->target));
       if (p->dep[0] == '$')
