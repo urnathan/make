@@ -1,5 +1,6 @@
 /* C++ Module Mapper Machinery.  Experimental!
-Copyright (C) 1988-2018 Free Software Foundation, Inc.
+WARNING:FSF Assignment for this project in progress
+   Copyright (C) 2019 Nathan Sidwell, I guess
 Written by Nathan Sidwell <nathan@acm.org> while at FaceBook
 
 This file is part of GNU Make.
@@ -58,27 +59,9 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include <sys/select.h>
 
-/*
-  C++.PREFIX := {repodir/pfx}
-
-  # module name-> bmi name mapping
-  # C++.{modulename} : {bminame} ;
-  %.c++m : $(C++.PREFIX)%.gcm ;
-  "%".c++m : $(C++.PREFIX)%.gcmu ;
-  <%>.c++m : $(C++.PREFIX)%.gcms ;
-
-  ## bmi dependency:
-  # {bminame} : {sources} | objectname
-  # {bminame} : {sources} ; CCrule
-  
-  $(C++.PREFIX)%.gcm : | %.o ;
-  $(C++.PREFIX)%.gcmu : % ; $(COMPILE.cc) -fmodule-legacy='"$*"' $<
-  $(C++.PREFIX)%.gcms : % ; $(COMPILE.cc) -fmodule-legacy='<$*>' $<
- */
-
 #define MAPPER_VERSION 0
 
-#define LEGACY_VAR "CXX_MODULE_LEGACY"
+#define HEADER_VAR "CXX_MODULE_HEADER"
 #define MAPPER_VAR "CXX_MODULE_MAPPER"
 #define PREFIX_VAR "CXX_MODULE_PREFIX"
 #define MODULE_SUFFIX "c++m"
@@ -740,16 +723,16 @@ mapper_default_rules (void)
       {"$(" PREFIX_VAR ")%." BMI_SUFFIX, "| %.o", ""},
 
       {"$(" PREFIX_VAR ")%." BMI_SUFFIX "u", "%",
-       "$(COMPILE.cc) $(call " LEGACY_VAR ",\"$*\") $<"},
+       "$(COMPILE.cc) $(call " HEADER_VAR ",\"$*\") $<"},
       {"$(" PREFIX_VAR ")%." BMI_SUFFIX "s", "%",
-       "$(COMPILE.cc) $(call " LEGACY_VAR ",<$*>) $<"},
+       "$(COMPILE.cc) $(call " HEADER_VAR ",<$*>) $<"},
 	
       {0, 0, 0}
     };
   struct pspec *p;
 
-  define_variable_global (LEGACY_VAR, strlen (LEGACY_VAR),
-			  "-fmodule-legacy='$1'", o_default, 1, NILF);
+  define_variable_global (HEADER_VAR, strlen (HEADER_VAR),
+			  "-fmodule-header='$1'", o_default, 1, NILF);
 
   for (p = rules; p->target; p++)
     {
